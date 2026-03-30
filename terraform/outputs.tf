@@ -55,3 +55,13 @@ output "kinesis_stream_arn" {
   description = "Kinesis stream ARN"
   value       = aws_kinesis_stream.clinical_events.arn
 }
+
+output "dashboard_url" {
+  description = "Dashboard ALB URL"
+  value       = "http://${aws_lb.dashboard.dns_name}"
+}
+
+output "ecr_repository_url" {
+  description = "ECR repository URL for the dashboard image"
+  value       = aws_ecr_repository.dashboard.repository_url
+}
