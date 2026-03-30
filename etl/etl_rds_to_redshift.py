@@ -1,10 +1,10 @@
 """
-ETL Pipeline: RDS PostgreSQL → Redshift
-Transforms normalized operational data into dimensional models for analytics.
+ETL Pipeline: RDS PostgreSQL (OMOP CDM) → Redshift
+Transforms OMOP operational data into Kimball dimensional models for analytics.
 
 Stages:
-    1. Load dimension tables (dim_patient, dim_condition, dim_medication)
-    2. Load fact tables (fact_encounters, fact_conditions, fact_medications)
+    1. Load dimension tables (dim_patient, dim_condition, dim_medication, dim_procedure)
+    2. Load fact tables (fact_encounters, fact_conditions, fact_medications, fact_procedures)
     3. Build aggregate table (fact_patient_metrics)
 
 Configuration via environment variables:
@@ -86,7 +86,7 @@ def rs_insert_batch(sql, rows, batch_size=500):
             batch = rows[i : i + batch_size]
             cur.executemany(sql, batch)
             total += len(batch)
-            if total % 2000 == 0:
+            if total % 5000 == 0:
                 log.info("  ... %d rows inserted", total)
         conn.commit()
     except Exception:
@@ -110,16 +110,6 @@ def rds_fetch_all(sql):
         conn.close()
 
 
-def compute_age(birthdate, deathdate=None):
-    """Calculate age from birthdate, using deathdate if deceased."""
-    if not birthdate:
-        return None
-    ref = deathdate if deathdate else date.today()
-    return ref.year - birthdate.year - (
-        (ref.month, ref.day) < (birthdate.month, birthdate.day)
-    )
-
-
 def age_group(age):
     if age is None:
         return None
@@ -136,48 +126,51 @@ def age_group(age):
     return "80+"
 
 
-def income_bracket(income):
-    if income is None:
-        return None
-    if income < 30000:
-        return "low"
-    if income < 75000:
-        return "middle"
-    return "high"
-
-
 # ── Dimension Loaders ────────────────────────────────────
 
 def load_dim_patient():
     log.info("Loading dim_patient")
 
     rows = rds_fetch_all("""
-        SELECT id, first_name, last_name, gender, race, ethnicity, marital,
-               birthdate, deathdate, state, city, county, zip, income
-        FROM patients
+        SELECT
+            p.person_id,
+            p.gender_source_value,
+            p.race_source_value,
+            p.ethnicity_source_value,
+            p.year_of_birth,
+            p.birth_datetime,
+            op.observation_period_start_date,
+            op.observation_period_end_date
+        FROM person p
+        LEFT JOIN observation_period op ON p.person_id = op.person_id
     """)
 
-    # Clear and reload (Type 1 SCD — full refresh)
     rs_execute("DELETE FROM fact_patient_metrics")
     rs_execute("DELETE FROM dim_patient")
 
     insert_sql = """
         INSERT INTO dim_patient (
-            patient_id, first_name, last_name, gender, race, ethnicity,
-            marital_status, birthdate, deathdate, is_deceased,
-            age, age_group, state, city, county, zip, income, income_bracket
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            person_id, gender, race, ethnicity,
+            year_of_birth, birth_datetime, is_deceased,
+            age, age_group, observation_start, observation_end
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """
 
+    today = date.today()
     transformed = []
     for row in rows:
-        pid, fname, lname, gender, race, eth, marital, bdate, ddate, \
-            st, city, county, zipcode, inc = row
-        a = compute_age(bdate, ddate)
+        pid, gender, race, ethnicity, yob, bdate, obs_start, obs_end = row
+        # Compute age from year of birth
+        age = today.year - yob if yob else None
+        # If observation period ended well in the past, likely deceased
+        is_deceased = obs_end is not None and (today - obs_end).days > 365 if obs_end else False
+        if is_deceased and age is not None and obs_end:
+            age = obs_end.year - yob
+
         transformed.append((
-            pid, fname, lname, gender, race, eth, marital,
-            bdate, ddate, ddate is not None,
-            a, age_group(a), st, city, county, zipcode, inc, income_bracket(inc),
+            pid, gender, race, ethnicity,
+            yob, bdate, is_deceased,
+            age, age_group(age), obs_start, obs_end,
         ))
 
     count = rs_insert_batch(insert_sql, transformed)
@@ -188,25 +181,33 @@ def load_dim_patient():
 def load_dim_condition():
     log.info("Loading dim_condition")
 
+    # Get distinct condition concepts from RDS, joining concept table for names
     rows = rds_fetch_all("""
-        SELECT DISTINCT code, description, system
-        FROM conditions
-        WHERE code IS NOT NULL
+        SELECT DISTINCT
+            co.condition_concept_id,
+            COALESCE(c.concept_name, co.condition_source_value, 'Unknown'),
+            c.concept_code,
+            c.vocabulary_id
+        FROM condition_occurrence co
+        LEFT JOIN concept c ON co.condition_concept_id = c.concept_id
+        WHERE co.condition_concept_id != 0
     """)
 
     rs_execute("DELETE FROM dim_condition")
 
     insert_sql = """
-        INSERT INTO dim_condition (code, description, body_system, chronicity, severity_tier)
-        VALUES (%s,%s,%s,%s,%s)
+        INSERT INTO dim_condition (
+            condition_concept_id, concept_name, concept_code, vocabulary_id,
+            body_system, chronicity, severity_tier
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s)
     """
 
     transformed = []
-    for code, desc, system in rows:
-        body_sys = classify_body_system(desc)
-        chron = classify_chronicity(desc)
-        severity = classify_severity(desc)
-        transformed.append((code, desc, body_sys, chron, severity))
+    for concept_id, name, code, vocab in rows:
+        body_sys = classify_body_system(name)
+        chron = classify_chronicity(name)
+        severity = classify_severity(name)
+        transformed.append((concept_id, name, code, vocab, body_sys, chron, severity))
 
     count = rs_insert_batch(insert_sql, transformed)
     log.info("dim_condition: %d rows loaded", count)
@@ -217,25 +218,65 @@ def load_dim_medication():
     log.info("Loading dim_medication")
 
     rows = rds_fetch_all("""
-        SELECT DISTINCT code, description
-        FROM medications
-        WHERE code IS NOT NULL
+        SELECT DISTINCT
+            de.drug_concept_id,
+            COALESCE(c.concept_name, de.drug_source_value, 'Unknown'),
+            c.concept_code,
+            c.vocabulary_id
+        FROM drug_exposure de
+        LEFT JOIN concept c ON de.drug_concept_id = c.concept_id
+        WHERE de.drug_concept_id != 0
     """)
 
     rs_execute("DELETE FROM dim_medication")
 
     insert_sql = """
-        INSERT INTO dim_medication (code, description, therapeutic_class)
-        VALUES (%s,%s,%s)
+        INSERT INTO dim_medication (
+            drug_concept_id, concept_name, concept_code, vocabulary_id,
+            therapeutic_class
+        ) VALUES (%s,%s,%s,%s,%s)
     """
 
     transformed = []
-    for code, desc in rows:
-        t_class = classify_therapeutic_class(desc)
-        transformed.append((code, desc, t_class))
+    for concept_id, name, code, vocab in rows:
+        t_class = classify_therapeutic_class(name)
+        transformed.append((concept_id, name, code, vocab, t_class))
 
     count = rs_insert_batch(insert_sql, transformed)
     log.info("dim_medication: %d rows loaded", count)
+    return count
+
+
+def load_dim_procedure():
+    log.info("Loading dim_procedure")
+
+    rows = rds_fetch_all("""
+        SELECT DISTINCT
+            po.procedure_concept_id,
+            COALESCE(c.concept_name, po.procedure_source_value, 'Unknown'),
+            c.concept_code,
+            c.vocabulary_id
+        FROM procedure_occurrence po
+        LEFT JOIN concept c ON po.procedure_concept_id = c.concept_id
+        WHERE po.procedure_concept_id != 0
+    """)
+
+    rs_execute("DELETE FROM dim_procedure")
+
+    insert_sql = """
+        INSERT INTO dim_procedure (
+            procedure_concept_id, concept_name, concept_code, vocabulary_id,
+            procedure_category
+        ) VALUES (%s,%s,%s,%s,%s)
+    """
+
+    transformed = []
+    for concept_id, name, code, vocab in rows:
+        cat = classify_procedure_category(name)
+        transformed.append((concept_id, name, code, vocab, cat))
+
+    count = rs_insert_batch(insert_sql, transformed)
+    log.info("dim_procedure: %d rows loaded", count)
     return count
 
 
@@ -245,40 +286,38 @@ def load_fact_encounters():
     log.info("Loading fact_encounters")
 
     rows = rds_fetch_all("""
-        SELECT id, patient_id, start_time, stop_time, encounter_class,
-               code, description, base_encounter_cost, total_claim_cost,
-               payer_coverage, reason_code, reason_description
-        FROM encounters
+        SELECT
+            vo.visit_occurrence_id,
+            vo.person_id,
+            vo.visit_concept_id,
+            COALESCE(c.concept_name, 'Unknown') AS visit_class,
+            vo.visit_start_date,
+            vo.visit_end_date
+        FROM visit_occurrence vo
+        LEFT JOIN concept c ON vo.visit_concept_id = c.concept_id
     """)
 
     rs_execute("DELETE FROM fact_encounters")
 
     insert_sql = """
         INSERT INTO fact_encounters (
-            encounter_id, patient_id, date_key, encounter_class, code,
-            description, start_time, stop_time, duration_minutes,
-            base_encounter_cost, total_claim_cost, payer_coverage,
-            patient_out_of_pocket, reason_code, reason_description
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            visit_occurrence_id, person_id, date_key,
+            visit_concept_id, visit_class,
+            visit_start_date, visit_end_date, duration_days
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
     """
 
     transformed = []
     for row in rows:
-        eid, pid, start, stop, eclass, code, desc, base, total, payer, \
-            rcode, rdesc = row
-
-        date_key = int(start.strftime("%Y%m%d")) if start else None
+        vid, pid, vcid, vclass, start_date, end_date = row
+        date_key = int(start_date.strftime("%Y%m%d")) if start_date else None
         duration = None
-        if start and stop:
-            duration = int((stop - start).total_seconds() / 60)
-        oop = None
-        if total is not None and payer is not None:
-            oop = max(float(total) - float(payer), 0)
+        if start_date and end_date:
+            duration = (end_date - start_date).days
 
         transformed.append((
-            eid, pid, date_key, eclass, code, desc,
-            start, stop, duration, base, total, payer, oop,
-            rcode, rdesc,
+            vid, pid, date_key, vcid, vclass,
+            start_date, end_date, duration,
         ))
 
     count = rs_insert_batch(insert_sql, transformed)
@@ -290,32 +329,37 @@ def load_fact_conditions():
     log.info("Loading fact_conditions")
 
     rows = rds_fetch_all("""
-        SELECT patient_id, encounter_id, code, start_date, stop_date
-        FROM conditions
+        SELECT
+            co.person_id,
+            co.visit_occurrence_id,
+            co.condition_concept_id,
+            co.condition_start_date,
+            co.condition_end_date
+        FROM condition_occurrence co
     """)
 
     rs_execute("DELETE FROM fact_conditions")
 
     insert_sql = """
         INSERT INTO fact_conditions (
-            patient_id, encounter_id, condition_code, date_key,
-            start_date, stop_date, is_active, duration_days
+            person_id, visit_occurrence_id, condition_concept_id, date_key,
+            condition_start_date, condition_end_date, is_active, duration_days
         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
     """
 
     today = date.today()
     transformed = []
-    for pid, eid, code, start, stop in rows:
+    for pid, vid, concept_id, start, end in rows:
         date_key = int(start.strftime("%Y%m%d")) if start else None
-        is_active = stop is None or stop > today
+        is_active = end is None or end > today
         duration = None
-        if start and stop:
-            duration = (stop - start).days
+        if start and end:
+            duration = (end - start).days
         elif start:
             duration = (today - start).days
 
         transformed.append((
-            pid, eid, code, date_key, start, stop, is_active, duration,
+            pid, vid, concept_id, date_key, start, end, is_active, duration,
         ))
 
     count = rs_insert_batch(insert_sql, transformed)
@@ -327,41 +371,78 @@ def load_fact_medications():
     log.info("Loading fact_medications")
 
     rows = rds_fetch_all("""
-        SELECT patient_id, encounter_id, code, start_time, stop_time,
-               base_cost, payer_coverage, total_cost, dispenses
-        FROM medications
+        SELECT
+            de.person_id,
+            de.visit_occurrence_id,
+            de.drug_concept_id,
+            de.drug_exposure_start_date,
+            de.drug_exposure_end_date,
+            de.days_supply,
+            de.refills,
+            de.quantity
+        FROM drug_exposure de
     """)
 
     rs_execute("DELETE FROM fact_medications")
 
     insert_sql = """
         INSERT INTO fact_medications (
-            patient_id, encounter_id, medication_code, date_key,
-            start_date, stop_date, is_active, duration_days,
-            dispenses, base_cost, payer_coverage, total_cost
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            person_id, visit_occurrence_id, drug_concept_id, date_key,
+            drug_exposure_start_date, drug_exposure_end_date,
+            is_active, duration_days, days_supply, refills, quantity
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """
 
     today = date.today()
     transformed = []
-    for pid, eid, code, start, stop, base, payer, total, disp in rows:
-        start_date = start.date() if start else None
-        stop_date = stop.date() if stop else None
+    for pid, vid, concept_id, start, end, supply, refills, qty in rows:
         date_key = int(start.strftime("%Y%m%d")) if start else None
-        is_active = stop is None or stop_date > today
+        is_active = end is None or end > today
         duration = None
-        if start_date and stop_date:
-            duration = (stop_date - start_date).days
-        elif start_date:
-            duration = (today - start_date).days
+        if start and end:
+            duration = (end - start).days
+        elif start:
+            duration = (today - start).days
 
         transformed.append((
-            pid, eid, code, date_key, start_date, stop_date,
-            is_active, duration, disp, base, payer, total,
+            pid, vid, concept_id, date_key, start, end,
+            is_active, duration, supply, refills, qty,
         ))
 
     count = rs_insert_batch(insert_sql, transformed)
     log.info("fact_medications: %d rows loaded", count)
+    return count
+
+
+def load_fact_procedures():
+    log.info("Loading fact_procedures")
+
+    rows = rds_fetch_all("""
+        SELECT
+            po.person_id,
+            po.visit_occurrence_id,
+            po.procedure_concept_id,
+            po.procedure_date,
+            po.quantity
+        FROM procedure_occurrence po
+    """)
+
+    rs_execute("DELETE FROM fact_procedures")
+
+    insert_sql = """
+        INSERT INTO fact_procedures (
+            person_id, visit_occurrence_id, procedure_concept_id, date_key,
+            procedure_date, quantity
+        ) VALUES (%s,%s,%s,%s,%s,%s)
+    """
+
+    transformed = []
+    for pid, vid, concept_id, proc_date, qty in rows:
+        date_key = int(proc_date.strftime("%Y%m%d")) if proc_date else None
+        transformed.append((pid, vid, concept_id, date_key, proc_date, qty))
+
+    count = rs_insert_batch(insert_sql, transformed)
+    log.info("fact_procedures: %d rows loaded", count)
     return count
 
 
@@ -373,71 +454,63 @@ def build_fact_patient_metrics():
 
     rs_execute("DELETE FROM fact_patient_metrics")
 
+    # OMOP visit concept names for classification
     sql = """
     INSERT INTO fact_patient_metrics (
-        patient_id, age, gender, state, income,
-        total_encounters, wellness_encounters, emergency_encounters,
-        inpatient_encounters, outpatient_encounters,
-        ambulatory_encounters, urgentcare_encounters,
-        total_conditions, active_conditions, chronic_condition_count,
-        total_medications, active_medications, unique_medication_codes,
+        person_id, age, gender, race,
+        total_encounters, inpatient_visits, outpatient_visits, emergency_visits,
+        total_conditions, active_conditions, unique_condition_concepts,
+        chronic_condition_count,
+        total_drug_exposures, active_drug_exposures, unique_drug_concepts,
         polypharmacy_flag,
-        total_encounter_cost, avg_encounter_cost,
-        total_medication_cost, total_out_of_pocket,
-        first_encounter_date, last_encounter_date,
-        years_in_system, encounters_per_year, avg_days_between_encounters,
+        total_procedures, total_measurements,
+        first_visit_date, last_visit_date,
+        observation_years, visits_per_year, avg_days_between_visits,
         had_30_day_readmission
     )
     SELECT
-        dp.patient_id,
+        dp.person_id,
         dp.age,
         dp.gender,
-        dp.state,
-        dp.income,
+        dp.race,
 
         -- Encounter counts
-        COALESCE(enc.total_encounters, 0),
-        COALESCE(enc.wellness, 0),
-        COALESCE(enc.emergency, 0),
+        COALESCE(enc.total_visits, 0),
         COALESCE(enc.inpatient, 0),
         COALESCE(enc.outpatient, 0),
-        COALESCE(enc.ambulatory, 0),
-        COALESCE(enc.urgentcare, 0),
+        COALESCE(enc.emergency, 0),
 
         -- Condition counts
         COALESCE(cond.total_conditions, 0),
         COALESCE(cond.active_conditions, 0),
+        COALESCE(cond.unique_concepts, 0),
         COALESCE(cond.chronic_conditions, 0),
 
-        -- Medication counts
-        COALESCE(med.total_medications, 0),
-        COALESCE(med.active_medications, 0),
-        COALESCE(med.unique_codes, 0),
-        COALESCE(med.active_medications, 0) >= 5,
+        -- Drug counts
+        COALESCE(med.total_drugs, 0),
+        COALESCE(med.active_drugs, 0),
+        COALESCE(med.unique_concepts, 0),
+        COALESCE(med.active_drugs, 0) >= 5,
 
-        -- Costs
-        COALESCE(enc.total_cost, 0),
-        CASE WHEN COALESCE(enc.total_encounters, 0) > 0
-             THEN COALESCE(enc.total_cost, 0) / enc.total_encounters
-             ELSE 0 END,
-        COALESCE(med.total_med_cost, 0),
-        COALESCE(enc.total_oop, 0),
+        -- Procedure / measurement counts
+        COALESCE(proc.total_procedures, 0),
+        COALESCE(meas.total_measurements, 0),
 
         -- Utilization
-        enc.first_encounter,
-        enc.last_encounter,
-        CASE WHEN enc.first_encounter IS NOT NULL AND enc.last_encounter IS NOT NULL
-             THEN DATEDIFF(day, enc.first_encounter, enc.last_encounter) / 365.25
+        enc.first_visit,
+        enc.last_visit,
+        CASE WHEN enc.first_visit IS NOT NULL AND enc.last_visit IS NOT NULL
+             THEN DATEDIFF(day, enc.first_visit, enc.last_visit) / 365.25
              ELSE 0 END,
-        CASE WHEN enc.first_encounter IS NOT NULL AND enc.last_encounter IS NOT NULL
-                  AND DATEDIFF(day, enc.first_encounter, enc.last_encounter) > 0
-             THEN enc.total_encounters * 365.25
-                  / DATEDIFF(day, enc.first_encounter, enc.last_encounter)
+        CASE WHEN enc.first_visit IS NOT NULL AND enc.last_visit IS NOT NULL
+                  AND DATEDIFF(day, enc.first_visit, enc.last_visit) > 0
+             THEN enc.total_visits * 365.25
+                  / DATEDIFF(day, enc.first_visit, enc.last_visit)
              ELSE 0 END,
-        CASE WHEN COALESCE(enc.total_encounters, 0) > 1
-                  AND enc.first_encounter IS NOT NULL AND enc.last_encounter IS NOT NULL
-             THEN DATEDIFF(day, enc.first_encounter, enc.last_encounter)
-                  / (enc.total_encounters - 1.0)
+        CASE WHEN COALESCE(enc.total_visits, 0) > 1
+                  AND enc.first_visit IS NOT NULL AND enc.last_visit IS NOT NULL
+             THEN DATEDIFF(day, enc.first_visit, enc.last_visit)
+                  / (enc.total_visits - 1.0)
              ELSE NULL END,
 
         -- 30-day readmission
@@ -447,53 +520,64 @@ def build_fact_patient_metrics():
 
     LEFT JOIN (
         SELECT
-            patient_id,
-            COUNT(*)                                                    AS total_encounters,
-            SUM(CASE WHEN encounter_class = 'wellness' THEN 1 ELSE 0 END) AS wellness,
-            SUM(CASE WHEN encounter_class = 'emergency' THEN 1 ELSE 0 END) AS emergency,
-            SUM(CASE WHEN encounter_class = 'inpatient' THEN 1 ELSE 0 END) AS inpatient,
-            SUM(CASE WHEN encounter_class = 'outpatient' THEN 1 ELSE 0 END) AS outpatient,
-            SUM(CASE WHEN encounter_class = 'ambulatory' THEN 1 ELSE 0 END) AS ambulatory,
-            SUM(CASE WHEN encounter_class = 'urgentcare' THEN 1 ELSE 0 END) AS urgentcare,
-            SUM(COALESCE(total_claim_cost, 0))                         AS total_cost,
-            SUM(COALESCE(patient_out_of_pocket, 0))                    AS total_oop,
-            MIN(start_time)::DATE                                      AS first_encounter,
-            MAX(start_time)::DATE                                      AS last_encounter
+            person_id,
+            COUNT(*) AS total_visits,
+            SUM(CASE WHEN visit_class ILIKE '%inpatient%' THEN 1 ELSE 0 END) AS inpatient,
+            SUM(CASE WHEN visit_class ILIKE '%outpatient%' THEN 1 ELSE 0 END) AS outpatient,
+            SUM(CASE WHEN visit_class ILIKE '%emergency%' THEN 1 ELSE 0 END) AS emergency,
+            MIN(visit_start_date) AS first_visit,
+            MAX(visit_start_date) AS last_visit
         FROM fact_encounters
-        GROUP BY patient_id
-    ) enc ON dp.patient_id = enc.patient_id
+        GROUP BY person_id
+    ) enc ON dp.person_id = enc.person_id
 
     LEFT JOIN (
         SELECT
-            patient_id,
-            COUNT(*)                                        AS total_conditions,
-            SUM(CASE WHEN is_active THEN 1 ELSE 0 END)     AS active_conditions,
+            person_id,
+            COUNT(*) AS total_conditions,
+            SUM(CASE WHEN is_active THEN 1 ELSE 0 END) AS active_conditions,
+            COUNT(DISTINCT condition_concept_id) AS unique_concepts,
             SUM(CASE WHEN duration_days > 365 OR is_active THEN 1 ELSE 0 END) AS chronic_conditions
         FROM fact_conditions
-        GROUP BY patient_id
-    ) cond ON dp.patient_id = cond.patient_id
+        GROUP BY person_id
+    ) cond ON dp.person_id = cond.person_id
 
     LEFT JOIN (
         SELECT
-            patient_id,
-            COUNT(*)                                        AS total_medications,
-            SUM(CASE WHEN is_active THEN 1 ELSE 0 END)     AS active_medications,
-            COUNT(DISTINCT medication_code)                 AS unique_codes,
-            SUM(COALESCE(total_cost, 0))                    AS total_med_cost
+            person_id,
+            COUNT(*) AS total_drugs,
+            SUM(CASE WHEN is_active THEN 1 ELSE 0 END) AS active_drugs,
+            COUNT(DISTINCT drug_concept_id) AS unique_concepts
         FROM fact_medications
-        GROUP BY patient_id
-    ) med ON dp.patient_id = med.patient_id
+        GROUP BY person_id
+    ) med ON dp.person_id = med.person_id
 
     LEFT JOIN (
-        SELECT DISTINCT e1.patient_id, TRUE AS had_readmission
+        SELECT person_id, COUNT(*) AS total_procedures
+        FROM fact_procedures
+        GROUP BY person_id
+    ) proc ON dp.person_id = proc.person_id
+
+    LEFT JOIN (
+        SELECT person_id, COUNT(*) AS total_measurements
+        FROM fact_encounters fe
+        JOIN (SELECT visit_occurrence_id, COUNT(*) AS cnt
+              FROM fact_procedures GROUP BY visit_occurrence_id) x
+            ON fe.visit_occurrence_id = x.visit_occurrence_id
+        GROUP BY person_id
+    ) meas ON dp.person_id = meas.person_id
+
+    LEFT JOIN (
+        SELECT DISTINCT e1.person_id, TRUE AS had_readmission
         FROM fact_encounters e1
         JOIN fact_encounters e2
-            ON e1.patient_id = e2.patient_id
-            AND e2.start_time > e1.start_time
-            AND DATEDIFF(day, e1.start_time, e2.start_time) <= 30
-            AND e1.encounter_id != e2.encounter_id
-        WHERE e1.encounter_class IN ('inpatient', 'emergency')
-    ) readmit ON dp.patient_id = readmit.patient_id
+            ON e1.person_id = e2.person_id
+            AND e2.visit_start_date > e1.visit_start_date
+            AND DATEDIFF(day, e1.visit_start_date, e2.visit_start_date) <= 30
+            AND e1.visit_occurrence_id != e2.visit_occurrence_id
+        WHERE e1.visit_class ILIKE '%inpatient%'
+           OR e1.visit_class ILIKE '%emergency%'
+    ) readmit ON dp.person_id = readmit.person_id
     """
 
     count = rs_execute(sql)
@@ -502,8 +586,7 @@ def build_fact_patient_metrics():
 
 
 # ── Classification Helpers ───────────────────────────────
-# These use keyword matching on Synthea descriptions to derive categories.
-# In production you'd use a proper terminology service or lookup table.
+# Keyword matching on concept names to derive clinical categories.
 
 BODY_SYSTEM_KEYWORDS = {
     "Cardiovascular": ["heart", "cardiac", "coronary", "hypertens", "atrial", "angina", "myocardial"],
@@ -534,40 +617,40 @@ SEVERE_KEYWORDS = [
 ]
 
 
-def classify_body_system(description):
-    if not description:
+def classify_body_system(name):
+    if not name:
         return "Other"
-    desc_lower = description.lower()
+    lower = name.lower()
     for system, keywords in BODY_SYSTEM_KEYWORDS.items():
-        if any(kw in desc_lower for kw in keywords):
+        if any(kw in lower for kw in keywords):
             return system
     return "Other"
 
 
-def classify_chronicity(description):
-    if not description:
+def classify_chronicity(name):
+    if not name:
         return "acute"
-    desc_lower = description.lower()
-    if any(kw in desc_lower for kw in CHRONIC_KEYWORDS):
+    lower = name.lower()
+    if any(kw in lower for kw in CHRONIC_KEYWORDS):
         return "chronic"
     return "acute"
 
 
-def classify_severity(description):
-    if not description:
+def classify_severity(name):
+    if not name:
         return "mild"
-    desc_lower = description.lower()
-    if any(kw in desc_lower for kw in SEVERE_KEYWORDS):
+    lower = name.lower()
+    if any(kw in lower for kw in SEVERE_KEYWORDS):
         return "severe"
-    if any(kw in desc_lower for kw in CHRONIC_KEYWORDS):
+    if any(kw in lower for kw in CHRONIC_KEYWORDS):
         return "moderate"
     return "mild"
 
 
-def classify_therapeutic_class(description):
-    if not description:
+def classify_therapeutic_class(name):
+    if not name:
         return "Other"
-    desc_lower = description.lower()
+    lower = name.lower()
     classes = {
         "Analgesic": ["acetaminophen", "ibuprofen", "naproxen", "aspirin", "pain"],
         "Antibiotic": ["amoxicillin", "penicillin", "azithromycin", "cephalexin", "antibiotic", "cillin"],
@@ -578,15 +661,33 @@ def classify_therapeutic_class(description):
         "Bronchodilator": ["albuterol", "salbutamol", "ipratropium", "inhaler"],
         "Anticoagulant": ["warfarin", "heparin", "enoxaparin", "rivaroxaban", "apixaban"],
         "Proton Pump Inhibitor": ["omeprazole", "lansoprazole", "pantoprazole", "esomeprazole"],
-        "Corticosteroid": ["prednisone", "prednisolone", "dexamethasone", "hydrocortisone", "methylprednisolone"],
+        "Corticosteroid": ["prednisone", "prednisolone", "dexamethasone", "hydrocortisone"],
         "Vaccine": ["vaccine", "immunization", "influenza vaccine", "pneumococcal"],
         "Contraceptive": ["contraceptive", "etonogestrel", "levonorgestrel", "medroxyprogesterone"],
         "Opioid": ["oxycodone", "hydrocodone", "morphine", "fentanyl", "codeine", "tramadol"],
         "Antihistamine": ["cetirizine", "loratadine", "diphenhydramine", "fexofenadine"],
     }
     for t_class, keywords in classes.items():
-        if any(kw in desc_lower for kw in keywords):
+        if any(kw in lower for kw in keywords):
             return t_class
+    return "Other"
+
+
+def classify_procedure_category(name):
+    if not name:
+        return "Other"
+    lower = name.lower()
+    categories = {
+        "Diagnostic": ["screening", "assessment", "evaluation", "examination", "test", "review"],
+        "Imaging": ["x-ray", "radiograph", "ct scan", "mri", "ultrasound", "mammograph", "imaging"],
+        "Surgical": ["surgery", "surgical", "excision", "incision", "repair", "replacement", "removal"],
+        "Therapeutic": ["therapy", "treatment", "transfusion", "dialysis", "chemotherapy", "radiation"],
+        "Preventive": ["vaccination", "immunization", "prophylaxis", "counseling", "education"],
+        "Laboratory": ["blood", "urine", "biopsy", "culture", "panel", "analysis", "specimen"],
+    }
+    for cat, keywords in categories.items():
+        if any(kw in lower for kw in keywords):
+            return cat
     return "Other"
 
 
@@ -597,9 +698,10 @@ def verify():
     cur = conn.cursor()
     try:
         tables = [
-            "dim_patient", "dim_condition", "dim_medication", "dim_date",
+            "dim_patient", "dim_condition", "dim_medication", "dim_procedure",
+            "dim_date",
             "fact_encounters", "fact_conditions", "fact_medications",
-            "fact_patient_metrics",
+            "fact_procedures", "fact_patient_metrics",
         ]
         log.info("── Redshift verification ──")
         for table in tables:
@@ -614,7 +716,7 @@ def verify():
 # ── Main ─────────────────────────────────────────────────
 
 def main():
-    log.info("ETL: RDS → Redshift")
+    log.info("ETL: RDS (OMOP CDM) → Redshift")
     log.info("Source: %s/%s", RDS["host"], RDS["database"])
     log.info("Target: %s/%s", REDSHIFT["host"], REDSHIFT["database"])
 
@@ -622,11 +724,13 @@ def main():
     load_dim_patient()
     load_dim_condition()
     load_dim_medication()
+    load_dim_procedure()
 
     # Facts
     load_fact_encounters()
     load_fact_conditions()
     load_fact_medications()
+    load_fact_procedures()
 
     # Aggregates
     build_fact_patient_metrics()
