@@ -139,7 +139,7 @@ SORTKEY (full_date);
 
 -- ── fact_encounters ─────────────────────────────────────
 -- Grain: one row per visit_occurrence.
--- Uses patient_key (surrogate) — no direct person_id for de-identification.
+-- Uses patient_key (surrogate) for de-identification.
 
 CREATE TABLE fact_encounters (
     encounter_key         INTEGER IDENTITY(1,1) PRIMARY KEY,
@@ -235,7 +235,7 @@ SORTKEY (procedure_date, patient_key);
 -- Rebuilt by the analytics ETL after each data load.
 
 CREATE TABLE fact_patient_metrics (
-    patient_key                   INTEGER PRIMARY KEY,       -- FK → dim_patient (surrogate, no person_id)
+    patient_key                   INTEGER PRIMARY KEY,       -- FK → dim_patient (surrogate key)
 
     -- Demographics (denormalized for ML feature vectors)
     age                           INTEGER,
