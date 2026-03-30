@@ -120,4 +120,48 @@ Dimensions use surrogate keys and include descriptive attributes for filtering a
 
 ---
 
+## ADR-008: OMOP CDM as operational data model
+
+**Date:** 2026-03-29
+**Status:** Accepted
+
+**Context:** The initial implementation used custom table structures (patients, encounters, conditions, medications) with Synthea-native column names. While functional, this is a non-standard schema that doesn't align with healthcare industry practices.
+
+**Options:**
+1. Custom Synthea-native schema — simple, matches CSV column names directly
+2. OMOP CDM v5.4 — the healthcare industry standard from OHDSI, used by FDA, pharma, and major health systems worldwide (810M+ patient records)
+3. HL7 FHIR — modern API-first standard, JSON-based, better for interoperability than storage
+
+**Decision:** Adopt OMOP CDM v5.4 as the operational (RDS) data model. Source data comes from the pre-converted Synthea OMOP dataset on AWS Open Data (`s3://synthea-omop/`), available in 1K, 100K, and 2.8M patient sizes. The Redshift analytics layer remains a Kimball star schema, transforming OMOP tables into dimensional models — this is the correct architecture (OMOP CDM for operational conformity, Kimball for analytics performance).
+
+**Key OMOP tables used:**
+- `person` (replaces `patients`)
+- `visit_occurrence` (replaces `encounters`)
+- `condition_occurrence` (replaces `conditions`)
+- `drug_exposure` (replaces `medications`)
+- `procedure_occurrence` (new)
+- `measurement` (new — labs/vitals)
+- `observation` (new — allergies, social history)
+- `observation_period`, `condition_era`, `drug_era` (derived tables)
+- `concept` (vocabulary lookup for resolving concept IDs to names)
+
+**Impact:** All layers updated — RDS schema, both ETL pipelines, FastAPI routes, and ML scripts. API endpoints use OMOP naming (`/persons`, `/visits`, `/conditions`, `/drugs`). Concept IDs are resolved to human-readable names via the concept table.
+
+**Rationale:** Using OMOP demonstrates awareness of real-world healthcare data standards and makes the platform compatible with the OHDSI research ecosystem. The pre-converted dataset eliminates the need to run Synthea locally. This is a significant differentiator for the capstone — most educational projects use custom schemas.
+
+---
+
+## ADR-009: Batch/streaming data split via cutoff date
+
+**Date:** 2026-03-29
+**Status:** Accepted
+
+**Context:** We need to demonstrate both batch ETL and real-time streaming capabilities. Using a single dataset for both requires a mechanism to split data temporally.
+
+**Decision:** The S3-to-RDS ETL accepts a `CUTOFF_DATE` environment variable. All reference data (person, observation_period, vocabulary) is loaded in full. Clinical events (visits, conditions, drugs, procedures, measurements, observations) are filtered: records before the cutoff are loaded in batch, records after are reserved for the Kinesis streaming simulator. A `simulation_state.json` file is saved to S3 to track the cutoff point so the streaming simulator knows where to resume.
+
+**Rationale:** This creates a realistic demo scenario — historical data loaded in batch, new events arriving via stream. The cutoff is configurable so demos can be repeated with different split points. Tracking state in S3 makes the system resumable across sessions.
+
+---
+
 *New decisions are appended below as they arise.*
