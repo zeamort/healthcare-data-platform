@@ -37,9 +37,10 @@ FEATURE_COLUMNS = [
     "age",
     "total_encounters",
     "total_conditions",
-    "total_medications",
-    "total_encounter_cost",
-    "encounters_per_year",
+    "total_drug_exposures",
+    "total_procedures",
+    "total_measurements",
+    "visits_per_year",
     "chronic_condition_count",
 ]
 
@@ -57,7 +58,7 @@ def fetch_features():
     """Fetch patient metrics for clustering."""
     cols = ", ".join(FEATURE_COLUMNS)
     sql = f"""
-        SELECT patient_id, {cols}
+        SELECT person_id, {cols}
         FROM fact_patient_metrics
         WHERE age IS NOT NULL AND total_encounters > 0
     """
@@ -70,10 +71,10 @@ def fetch_features():
         cur.close()
         conn.close()
 
-    patient_ids = [r[0] for r in rows]
+    person_ids = [r[0] for r in rows]
     features = np.array([[float(v) if v is not None else 0.0 for v in r[1:]] for r in rows])
-    log.info("Fetched %d patients with %d features", len(patient_ids), len(FEATURE_COLUMNS))
-    return patient_ids, features
+    log.info("Fetched %d patients with %d features", len(person_ids), len(FEATURE_COLUMNS))
+    return person_ids, features
 
 
 def find_optimal_k(X_scaled):
@@ -98,18 +99,17 @@ def assign_cluster_labels(km, scaler, feature_names):
     centroids = scaler.inverse_transform(km.cluster_centers_)
     labels = {}
 
-    # Build a profile for each cluster
     for i, centroid in enumerate(centroids):
         profile = dict(zip(feature_names, centroid))
         age = profile["age"]
-        cost = profile["total_encounter_cost"]
         encounters = profile["total_encounters"]
         chronic = profile["chronic_condition_count"]
+        procedures = profile["total_procedures"]
 
-        if age < 35 and cost < np.median(centroids[:, feature_names.index("total_encounter_cost")]):
+        if age < 35 and encounters < 10:
             label = "Young & Healthy"
-        elif chronic >= 3 or (encounters > 30 and cost > 50000):
-            label = "Complex / High-Cost"
+        elif chronic >= 3 or (encounters > 30 and procedures > 20):
+            label = "Complex / High-Utilization"
         elif age >= 65:
             label = "Senior Care"
         elif encounters > 15:
@@ -118,26 +118,26 @@ def assign_cluster_labels(km, scaler, feature_names):
             label = "Low Utilization"
 
         labels[i] = label
-        log.info("  Cluster %d: '%s' (age=%.0f, encounters=%.0f, cost=$%.0f, chronic=%.0f)",
-                 i, label, age, encounters, cost, chronic)
+        log.info("  Cluster %d: '%s' (age=%.0f, encounters=%.0f, chronic=%.0f, procedures=%.0f)",
+                 i, label, age, encounters, chronic, procedures)
 
     return labels
 
 
-def write_results(patient_ids, cluster_ids, cluster_labels_map):
+def write_results(person_ids, cluster_ids, cluster_labels_map):
     """Write cluster assignments back to Redshift."""
     conn = rs_conn()
     cur = conn.cursor()
     try:
-        for pid, cid in zip(patient_ids, cluster_ids):
+        for pid, cid in zip(person_ids, cluster_ids):
             label = cluster_labels_map.get(cid, f"Cluster {cid}")
             cur.execute("""
                 UPDATE fact_patient_metrics
                 SET cluster_id = %s, cluster_label = %s, updated_at = GETDATE()
-                WHERE patient_id = %s
+                WHERE person_id = %s
             """, (int(cid), label, pid))
         conn.commit()
-        log.info("Wrote cluster assignments for %d patients", len(patient_ids))
+        log.info("Wrote cluster assignments for %d patients", len(person_ids))
     except Exception:
         conn.rollback()
         raise
@@ -149,9 +149,9 @@ def write_results(patient_ids, cluster_ids, cluster_labels_map):
 def main():
     log.info("ML Pipeline: Patient Segmentation (K-Means)")
 
-    patient_ids, features = fetch_features()
-    if len(patient_ids) < K_MAX:
-        log.warning("Too few patients (%d) for clustering. Skipping.", len(patient_ids))
+    person_ids, features = fetch_features()
+    if len(person_ids) < K_MAX:
+        log.warning("Too few patients (%d) for clustering. Skipping.", len(person_ids))
         return
 
     # Scale features
@@ -171,14 +171,14 @@ def main():
     labels_map = assign_cluster_labels(km, scaler, FEATURE_COLUMNS)
 
     # Write back
-    write_results(patient_ids, cluster_ids, labels_map)
+    write_results(person_ids, cluster_ids, labels_map)
 
     # Summary
     log.info("── Cluster Summary ──")
     for cid in range(optimal_k):
         count = int(np.sum(cluster_ids == cid))
         label = labels_map.get(cid, f"Cluster {cid}")
-        log.info("  %s: %d patients (%.1f%%)", label, count, 100 * count / len(patient_ids))
+        log.info("  %s: %d patients (%.1f%%)", label, count, 100 * count / len(person_ids))
 
     log.info("Clustering complete.")
 

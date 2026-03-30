@@ -4,8 +4,8 @@ ML Pipeline: Disease Co-occurrence Analysis
 Analyzes which conditions appear together in patients, computes co-occurrence
 frequency and lift scores, and writes top comorbidity pairs to Redshift.
 
-This is an association analysis approach — not clustering or classification,
-demonstrating a third ML paradigm relevant to healthcare.
+Uses OMOP concept IDs for condition identification, with concept names
+resolved from the dim_condition table.
 
 Configuration via environment variables:
     REDSHIFT_HOST, REDSHIFT_PORT, REDSHIFT_DATABASE, REDSHIFT_USER, REDSHIFT_PASSWORD
@@ -41,11 +41,11 @@ def rs_conn():
 
 
 def fetch_patient_conditions():
-    """Fetch each patient's set of condition codes."""
+    """Fetch each patient's set of condition concept IDs."""
     sql = """
-        SELECT patient_id, condition_code
+        SELECT person_id, condition_concept_id
         FROM fact_conditions
-        WHERE condition_code IS NOT NULL
+        WHERE condition_concept_id IS NOT NULL AND condition_concept_id != 0
     """
     conn = rs_conn()
     cur = conn.cursor()
@@ -57,21 +57,21 @@ def fetch_patient_conditions():
         conn.close()
 
     patient_conditions = defaultdict(set)
-    for pid, code in rows:
-        patient_conditions[pid].add(code)
+    for pid, concept_id in rows:
+        patient_conditions[pid].add(concept_id)
 
     log.info("Fetched conditions for %d patients", len(patient_conditions))
     return patient_conditions
 
 
-def fetch_condition_descriptions():
-    """Fetch condition code → description mapping."""
-    sql = "SELECT code, description FROM dim_condition"
+def fetch_condition_names():
+    """Fetch condition concept_id → concept_name mapping."""
+    sql = "SELECT condition_concept_id, concept_name FROM dim_condition"
     conn = rs_conn()
     cur = conn.cursor()
     try:
         cur.execute(sql)
-        return {code: desc for code, desc in cur.fetchall()}
+        return {cid: name for cid, name in cur.fetchall()}
     finally:
         cur.close()
         conn.close()
@@ -84,14 +84,14 @@ def compute_comorbidities(patient_conditions):
     # Count individual condition frequencies
     condition_freq = defaultdict(int)
     for conditions in patient_conditions.values():
-        for code in conditions:
-            condition_freq[code] += 1
+        for cid in conditions:
+            condition_freq[cid] += 1
 
     # Count pair co-occurrences
     pair_counts = defaultdict(int)
     for conditions in patient_conditions.values():
-        sorted_codes = sorted(conditions)
-        for pair in combinations(sorted_codes, 2):
+        sorted_ids = sorted(conditions)
+        for pair in combinations(sorted_ids, 2):
             pair_counts[pair] += 1
 
     # Compute metrics for each pair
@@ -109,8 +109,8 @@ def compute_comorbidities(patient_conditions):
         lift = support / expected if expected > 0 else 0
 
         results.append({
-            "condition_1": c1,
-            "condition_2": c2,
+            "condition_concept_id_1": c1,
+            "condition_concept_id_2": c2,
             "shared_patients": shared,
             "support": round(support, 6),
             "lift": round(lift, 4),
@@ -123,39 +123,8 @@ def compute_comorbidities(patient_conditions):
     return results
 
 
-def ensure_table_exists():
-    """Create the comorbidity results table if it doesn't exist."""
-    sql = """
-    CREATE TABLE IF NOT EXISTS comorbidity_analysis (
-        condition_1       VARCHAR(50),
-        condition_2       VARCHAR(50),
-        description_1     VARCHAR(500),
-        description_2     VARCHAR(500),
-        shared_patients   INTEGER,
-        support           DECIMAL(10,6),
-        lift              DECIMAL(10,4),
-        freq_condition_1  INTEGER,
-        freq_condition_2  INTEGER,
-        loaded_at         TIMESTAMP DEFAULT GETDATE(),
-        PRIMARY KEY (condition_1, condition_2)
-    )
-    DISTSTYLE ALL
-    SORTKEY (shared_patients);
-    """
-    conn = rs_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(sql)
-        conn.commit()
-    finally:
-        cur.close()
-        conn.close()
-
-
-def write_results(results, descriptions):
-    """Write comorbidity pairs to Redshift."""
-    ensure_table_exists()
-
+def write_results(results, names):
+    """Write comorbidity pairs to Redshift (table already exists from schema)."""
     conn = rs_conn()
     cur = conn.cursor()
     try:
@@ -164,15 +133,18 @@ def write_results(results, descriptions):
         for r in results[:200]:  # top 200 pairs
             cur.execute("""
                 INSERT INTO comorbidity_analysis (
-                    condition_1, condition_2, description_1, description_2,
-                    shared_patients, support, lift, freq_condition_1, freq_condition_2
+                    condition_concept_id_1, condition_concept_id_2,
+                    concept_name_1, concept_name_2,
+                    co_occurrence_count, patient_count_1, patient_count_2,
+                    support, lift
                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
-                r["condition_1"], r["condition_2"],
-                descriptions.get(r["condition_1"], "Unknown"),
-                descriptions.get(r["condition_2"], "Unknown"),
-                r["shared_patients"], r["support"], r["lift"],
+                r["condition_concept_id_1"], r["condition_concept_id_2"],
+                names.get(r["condition_concept_id_1"], "Unknown"),
+                names.get(r["condition_concept_id_2"], "Unknown"),
+                r["shared_patients"],
                 r["freq_c1"], r["freq_c2"],
+                r["support"], r["lift"],
             ))
 
         conn.commit()
@@ -189,7 +161,7 @@ def main():
     log.info("ML Pipeline: Disease Co-occurrence Analysis")
 
     patient_conditions = fetch_patient_conditions()
-    descriptions = fetch_condition_descriptions()
+    names = fetch_condition_names()
 
     if len(patient_conditions) < 10:
         log.warning("Too few patients (%d) for comorbidity analysis. Skipping.",
@@ -205,12 +177,12 @@ def main():
     # Log top 10
     log.info("── Top 10 Comorbidity Pairs ──")
     for r in results[:10]:
-        d1 = descriptions.get(r["condition_1"], r["condition_1"])[:40]
-        d2 = descriptions.get(r["condition_2"], r["condition_2"])[:40]
+        n1 = names.get(r["condition_concept_id_1"], str(r["condition_concept_id_1"]))[:40]
+        n2 = names.get(r["condition_concept_id_2"], str(r["condition_concept_id_2"]))[:40]
         log.info("  %s + %s  (n=%d, lift=%.2f)",
-                 d1, d2, r["shared_patients"], r["lift"])
+                 n1, n2, r["shared_patients"], r["lift"])
 
-    write_results(results, descriptions)
+    write_results(results, names)
     log.info("Comorbidity analysis complete.")
 
 
