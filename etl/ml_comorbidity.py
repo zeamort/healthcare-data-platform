@@ -43,7 +43,7 @@ def rs_conn():
 def fetch_patient_conditions():
     """Fetch each patient's set of condition concept IDs."""
     sql = """
-        SELECT person_id, condition_concept_id
+        SELECT patient_key, condition_concept_id
         FROM fact_conditions
         WHERE condition_concept_id IS NOT NULL AND condition_concept_id != 0
     """
@@ -57,8 +57,8 @@ def fetch_patient_conditions():
         conn.close()
 
     patient_conditions = defaultdict(set)
-    for pid, concept_id in rows:
-        patient_conditions[pid].add(concept_id)
+    for pk, concept_id in rows:
+        patient_conditions[pk].add(concept_id)
 
     log.info("Fetched conditions for %d patients", len(patient_conditions))
     return patient_conditions

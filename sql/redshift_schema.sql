@@ -139,11 +139,12 @@ SORTKEY (full_date);
 
 -- ── fact_encounters ─────────────────────────────────────
 -- Grain: one row per visit_occurrence.
+-- Uses patient_key (surrogate) — no direct person_id for de-identification.
 
 CREATE TABLE fact_encounters (
     encounter_key         INTEGER IDENTITY(1,1) PRIMARY KEY,
     visit_occurrence_id   BIGINT NOT NULL,
-    person_id             BIGINT NOT NULL,               -- FK → dim_patient
+    patient_key           INTEGER NOT NULL,               -- FK → dim_patient (surrogate)
     date_key              INTEGER,                       -- FK → dim_date
 
     -- Visit attributes
@@ -158,8 +159,8 @@ CREATE TABLE fact_encounters (
     loaded_at             TIMESTAMP DEFAULT GETDATE()
 )
 DISTSTYLE KEY
-DISTKEY (person_id)
-SORTKEY (visit_start_date, person_id);
+DISTKEY (patient_key)
+SORTKEY (visit_start_date, patient_key);
 
 
 -- ── fact_conditions ─────────────────────────────────────
@@ -167,7 +168,7 @@ SORTKEY (visit_start_date, person_id);
 
 CREATE TABLE fact_conditions (
     condition_key_id        INTEGER IDENTITY(1,1) PRIMARY KEY,
-    person_id               BIGINT NOT NULL,               -- FK → dim_patient
+    patient_key             INTEGER NOT NULL,               -- FK → dim_patient (surrogate)
     visit_occurrence_id     BIGINT,
     condition_concept_id    INTEGER,                       -- FK → dim_condition
     date_key                INTEGER,                       -- FK → dim_date
@@ -180,8 +181,8 @@ CREATE TABLE fact_conditions (
     loaded_at               TIMESTAMP DEFAULT GETDATE()
 )
 DISTSTYLE KEY
-DISTKEY (person_id)
-SORTKEY (condition_start_date, person_id, condition_concept_id);
+DISTKEY (patient_key)
+SORTKEY (condition_start_date, patient_key, condition_concept_id);
 
 
 -- ── fact_medications ────────────────────────────────────
@@ -189,7 +190,7 @@ SORTKEY (condition_start_date, person_id, condition_concept_id);
 
 CREATE TABLE fact_medications (
     medication_key_id       INTEGER IDENTITY(1,1) PRIMARY KEY,
-    person_id               BIGINT NOT NULL,               -- FK → dim_patient
+    patient_key             INTEGER NOT NULL,               -- FK → dim_patient (surrogate)
     visit_occurrence_id     BIGINT,
     drug_concept_id         INTEGER,                       -- FK → dim_medication
     date_key                INTEGER,                       -- FK → dim_date
@@ -205,8 +206,8 @@ CREATE TABLE fact_medications (
     loaded_at               TIMESTAMP DEFAULT GETDATE()
 )
 DISTSTYLE KEY
-DISTKEY (person_id)
-SORTKEY (drug_exposure_start_date, person_id, drug_concept_id);
+DISTKEY (patient_key)
+SORTKEY (drug_exposure_start_date, patient_key, drug_concept_id);
 
 
 -- ── fact_procedures ─────────────────────────────────────
@@ -214,7 +215,7 @@ SORTKEY (drug_exposure_start_date, person_id, drug_concept_id);
 
 CREATE TABLE fact_procedures (
     procedure_key_id        INTEGER IDENTITY(1,1) PRIMARY KEY,
-    person_id               BIGINT NOT NULL,               -- FK → dim_patient
+    patient_key             INTEGER NOT NULL,               -- FK → dim_patient (surrogate)
     visit_occurrence_id     BIGINT,
     procedure_concept_id    INTEGER,                       -- FK → dim_procedure
     date_key                INTEGER,                       -- FK → dim_date
@@ -225,8 +226,8 @@ CREATE TABLE fact_procedures (
     loaded_at               TIMESTAMP DEFAULT GETDATE()
 )
 DISTSTYLE KEY
-DISTKEY (person_id)
-SORTKEY (procedure_date, person_id);
+DISTKEY (patient_key)
+SORTKEY (procedure_date, patient_key);
 
 
 -- ── fact_patient_metrics ────────────────────────────────
@@ -234,7 +235,7 @@ SORTKEY (procedure_date, person_id);
 -- Rebuilt by the analytics ETL after each data load.
 
 CREATE TABLE fact_patient_metrics (
-    person_id                     BIGINT PRIMARY KEY,
+    patient_key                   INTEGER PRIMARY KEY,       -- FK → dim_patient (surrogate, no person_id)
 
     -- Demographics (denormalized for ML feature vectors)
     age                           INTEGER,
@@ -287,7 +288,7 @@ CREATE TABLE fact_patient_metrics (
     updated_at                    TIMESTAMP DEFAULT GETDATE()
 )
 DISTSTYLE KEY
-DISTKEY (person_id)
+DISTKEY (patient_key)
 SORTKEY (risk_score, cluster_id, total_encounters);
 
 
@@ -340,7 +341,7 @@ SELECT
     dc.body_system,
     dc.chronicity,
     COUNT(*)                             AS occurrence_count,
-    COUNT(DISTINCT fc.person_id)         AS unique_patients,
+    COUNT(DISTINCT fc.patient_key)       AS unique_patients,
     ROUND(AVG(CASE WHEN fc.is_active THEN 1.0 ELSE 0.0 END), 3) AS pct_active
 FROM fact_conditions fc
 LEFT JOIN dim_condition dc ON fc.condition_concept_id = dc.condition_concept_id
@@ -356,7 +357,7 @@ SELECT
     dd.month_name,
     fe.visit_class,
     COUNT(*)                           AS encounter_count,
-    COUNT(DISTINCT fe.person_id)       AS unique_patients
+    COUNT(DISTINCT fe.patient_key)     AS unique_patients
 FROM fact_encounters fe
 JOIN dim_date dd ON fe.date_key = dd.date_key
 GROUP BY dd.year, dd.month, dd.month_name, fe.visit_class
@@ -393,14 +394,14 @@ LIMIT 50;
 -- Polypharmacy patients
 CREATE OR REPLACE VIEW vw_polypharmacy AS
 SELECT
-    pm.person_id,
+    pm.patient_key,
     dp.age,
     dp.gender,
     pm.active_drug_exposures,
     pm.active_conditions,
     pm.risk_tier
 FROM fact_patient_metrics pm
-JOIN dim_patient dp ON pm.person_id = dp.person_id
+JOIN dim_patient dp ON pm.patient_key = dp.patient_key
 WHERE pm.polypharmacy_flag = TRUE
 ORDER BY pm.active_drug_exposures DESC;
 

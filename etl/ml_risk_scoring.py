@@ -61,7 +61,7 @@ def fetch_data():
     """Fetch features and target from Redshift."""
     cols = ", ".join(FEATURE_COLUMNS)
     sql = f"""
-        SELECT person_id, {cols}, {TARGET_COLUMN}
+        SELECT patient_key, {cols}, {TARGET_COLUMN}
         FROM fact_patient_metrics
         WHERE age IS NOT NULL AND total_encounters > 0
     """
@@ -74,7 +74,7 @@ def fetch_data():
         cur.close()
         conn.close()
 
-    person_ids = [r[0] for r in rows]
+    patient_keys = [r[0] for r in rows]
     features = np.array([
         [float(v) if v is not None else 0.0 for v in r[1:-1]]
         for r in rows
@@ -82,8 +82,8 @@ def fetch_data():
     targets = np.array([1 if r[-1] else 0 for r in rows])
 
     log.info("Fetched %d patients (%d positive, %d negative)",
-             len(person_ids), int(targets.sum()), int(len(targets) - targets.sum()))
-    return person_ids, features, targets
+             len(patient_keys), int(targets.sum()), int(len(targets) - targets.sum()))
+    return patient_keys, features, targets
 
 
 def risk_tier(score):
@@ -96,20 +96,20 @@ def risk_tier(score):
     return "low"
 
 
-def write_results(person_ids, scores):
+def write_results(patient_keys, scores):
     """Write risk scores and tiers back to Redshift."""
     conn = rs_conn()
     cur = conn.cursor()
     try:
-        for pid, score in zip(person_ids, scores):
+        for pk, score in zip(patient_keys, scores):
             tier = risk_tier(score)
             cur.execute("""
                 UPDATE fact_patient_metrics
                 SET risk_score = %s, risk_tier = %s, updated_at = GETDATE()
-                WHERE person_id = %s
-            """, (round(float(score), 4), tier, pid))
+                WHERE patient_key = %s
+            """, (round(float(score), 4), tier, pk))
         conn.commit()
-        log.info("Wrote risk scores for %d patients", len(person_ids))
+        log.info("Wrote risk scores for %d patients", len(patient_keys))
     except Exception:
         conn.rollback()
         raise
@@ -121,10 +121,10 @@ def write_results(person_ids, scores):
 def main():
     log.info("ML Pipeline: Patient Risk Scoring (Random Forest)")
 
-    person_ids, features, targets = fetch_data()
+    patient_keys, features, targets = fetch_data()
 
-    if len(person_ids) < 20:
-        log.warning("Too few patients (%d) for risk modeling. Skipping.", len(person_ids))
+    if len(patient_keys) < 20:
+        log.warning("Too few patients (%d) for risk modeling. Skipping.", len(patient_keys))
         return
 
     # Scale features
@@ -169,7 +169,7 @@ def main():
              classification_report(targets, predictions, target_names=["No Readmit", "Readmit"]))
 
     # Write results
-    write_results(person_ids, risk_scores)
+    write_results(patient_keys, risk_scores)
 
     # Tier distribution
     log.info("── Risk Tier Distribution ──")

@@ -280,9 +280,25 @@ def load_dim_procedure():
     return count
 
 
+# ── Patient Key Lookup ────────────────────────────────────
+
+def build_patient_key_map():
+    """Build person_id → patient_key lookup from dim_patient in Redshift."""
+    conn = rs_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT person_id, patient_key FROM dim_patient")
+        mapping = {row[0]: row[1] for row in cur.fetchall()}
+    finally:
+        cur.close()
+        conn.close()
+    log.info("Built patient_key map: %d patients", len(mapping))
+    return mapping
+
+
 # ── Fact Loaders ─────────────────────────────────────────
 
-def load_fact_encounters():
+def load_fact_encounters(pk_map):
     log.info("Loading fact_encounters")
 
     rows = rds_fetch_all("""
@@ -301,7 +317,7 @@ def load_fact_encounters():
 
     insert_sql = """
         INSERT INTO fact_encounters (
-            visit_occurrence_id, person_id, date_key,
+            visit_occurrence_id, patient_key, date_key,
             visit_concept_id, visit_class,
             visit_start_date, visit_end_date, duration_days
         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
@@ -310,13 +326,16 @@ def load_fact_encounters():
     transformed = []
     for row in rows:
         vid, pid, vcid, vclass, start_date, end_date = row
+        pkey = pk_map.get(pid)
+        if pkey is None:
+            continue
         date_key = int(start_date.strftime("%Y%m%d")) if start_date else None
         duration = None
         if start_date and end_date:
             duration = (end_date - start_date).days
 
         transformed.append((
-            vid, pid, date_key, vcid, vclass,
+            vid, pkey, date_key, vcid, vclass,
             start_date, end_date, duration,
         ))
 
@@ -325,7 +344,7 @@ def load_fact_encounters():
     return count
 
 
-def load_fact_conditions():
+def load_fact_conditions(pk_map):
     log.info("Loading fact_conditions")
 
     rows = rds_fetch_all("""
@@ -342,7 +361,7 @@ def load_fact_conditions():
 
     insert_sql = """
         INSERT INTO fact_conditions (
-            person_id, visit_occurrence_id, condition_concept_id, date_key,
+            patient_key, visit_occurrence_id, condition_concept_id, date_key,
             condition_start_date, condition_end_date, is_active, duration_days
         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
     """
@@ -350,6 +369,9 @@ def load_fact_conditions():
     today = date.today()
     transformed = []
     for pid, vid, concept_id, start, end in rows:
+        pkey = pk_map.get(pid)
+        if pkey is None:
+            continue
         date_key = int(start.strftime("%Y%m%d")) if start else None
         is_active = end is None or end > today
         duration = None
@@ -359,7 +381,7 @@ def load_fact_conditions():
             duration = (today - start).days
 
         transformed.append((
-            pid, vid, concept_id, date_key, start, end, is_active, duration,
+            pkey, vid, concept_id, date_key, start, end, is_active, duration,
         ))
 
     count = rs_insert_batch(insert_sql, transformed)
@@ -367,7 +389,7 @@ def load_fact_conditions():
     return count
 
 
-def load_fact_medications():
+def load_fact_medications(pk_map):
     log.info("Loading fact_medications")
 
     rows = rds_fetch_all("""
@@ -387,7 +409,7 @@ def load_fact_medications():
 
     insert_sql = """
         INSERT INTO fact_medications (
-            person_id, visit_occurrence_id, drug_concept_id, date_key,
+            patient_key, visit_occurrence_id, drug_concept_id, date_key,
             drug_exposure_start_date, drug_exposure_end_date,
             is_active, duration_days, days_supply, refills, quantity
         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -396,6 +418,9 @@ def load_fact_medications():
     today = date.today()
     transformed = []
     for pid, vid, concept_id, start, end, supply, refills, qty in rows:
+        pkey = pk_map.get(pid)
+        if pkey is None:
+            continue
         date_key = int(start.strftime("%Y%m%d")) if start else None
         is_active = end is None or end > today
         duration = None
@@ -405,7 +430,7 @@ def load_fact_medications():
             duration = (today - start).days
 
         transformed.append((
-            pid, vid, concept_id, date_key, start, end,
+            pkey, vid, concept_id, date_key, start, end,
             is_active, duration, supply, refills, qty,
         ))
 
@@ -414,7 +439,7 @@ def load_fact_medications():
     return count
 
 
-def load_fact_procedures():
+def load_fact_procedures(pk_map):
     log.info("Loading fact_procedures")
 
     rows = rds_fetch_all("""
@@ -431,15 +456,18 @@ def load_fact_procedures():
 
     insert_sql = """
         INSERT INTO fact_procedures (
-            person_id, visit_occurrence_id, procedure_concept_id, date_key,
+            patient_key, visit_occurrence_id, procedure_concept_id, date_key,
             procedure_date, quantity
         ) VALUES (%s,%s,%s,%s,%s,%s)
     """
 
     transformed = []
     for pid, vid, concept_id, proc_date, qty in rows:
+        pkey = pk_map.get(pid)
+        if pkey is None:
+            continue
         date_key = int(proc_date.strftime("%Y%m%d")) if proc_date else None
-        transformed.append((pid, vid, concept_id, date_key, proc_date, qty))
+        transformed.append((pkey, vid, concept_id, date_key, proc_date, qty))
 
     count = rs_insert_batch(insert_sql, transformed)
     log.info("fact_procedures: %d rows loaded", count)
@@ -454,10 +482,10 @@ def build_fact_patient_metrics():
 
     rs_execute("DELETE FROM fact_patient_metrics")
 
-    # OMOP visit concept names for classification
+    # Uses patient_key (surrogate) throughout — no person_id in analytics layer
     sql = """
     INSERT INTO fact_patient_metrics (
-        person_id, age, gender, race,
+        patient_key, age, gender, race,
         total_encounters, inpatient_visits, outpatient_visits, emergency_visits,
         total_conditions, active_conditions, unique_condition_concepts,
         chronic_condition_count,
@@ -469,7 +497,7 @@ def build_fact_patient_metrics():
         had_30_day_readmission
     )
     SELECT
-        dp.person_id,
+        dp.patient_key,
         dp.age,
         dp.gender,
         dp.race,
@@ -520,7 +548,7 @@ def build_fact_patient_metrics():
 
     LEFT JOIN (
         SELECT
-            person_id,
+            patient_key,
             COUNT(*) AS total_visits,
             SUM(CASE WHEN visit_class ILIKE '%inpatient%' THEN 1 ELSE 0 END) AS inpatient,
             SUM(CASE WHEN visit_class ILIKE '%outpatient%' THEN 1 ELSE 0 END) AS outpatient,
@@ -528,56 +556,56 @@ def build_fact_patient_metrics():
             MIN(visit_start_date) AS first_visit,
             MAX(visit_start_date) AS last_visit
         FROM fact_encounters
-        GROUP BY person_id
-    ) enc ON dp.person_id = enc.person_id
+        GROUP BY patient_key
+    ) enc ON dp.patient_key = enc.patient_key
 
     LEFT JOIN (
         SELECT
-            person_id,
+            patient_key,
             COUNT(*) AS total_conditions,
             SUM(CASE WHEN is_active THEN 1 ELSE 0 END) AS active_conditions,
             COUNT(DISTINCT condition_concept_id) AS unique_concepts,
             SUM(CASE WHEN duration_days > 365 OR is_active THEN 1 ELSE 0 END) AS chronic_conditions
         FROM fact_conditions
-        GROUP BY person_id
-    ) cond ON dp.person_id = cond.person_id
+        GROUP BY patient_key
+    ) cond ON dp.patient_key = cond.patient_key
 
     LEFT JOIN (
         SELECT
-            person_id,
+            patient_key,
             COUNT(*) AS total_drugs,
             SUM(CASE WHEN is_active THEN 1 ELSE 0 END) AS active_drugs,
             COUNT(DISTINCT drug_concept_id) AS unique_concepts
         FROM fact_medications
-        GROUP BY person_id
-    ) med ON dp.person_id = med.person_id
+        GROUP BY patient_key
+    ) med ON dp.patient_key = med.patient_key
 
     LEFT JOIN (
-        SELECT person_id, COUNT(*) AS total_procedures
+        SELECT patient_key, COUNT(*) AS total_procedures
         FROM fact_procedures
-        GROUP BY person_id
-    ) proc ON dp.person_id = proc.person_id
+        GROUP BY patient_key
+    ) proc ON dp.patient_key = proc.patient_key
 
     LEFT JOIN (
-        SELECT person_id, COUNT(*) AS total_measurements
+        SELECT patient_key, COUNT(*) AS total_measurements
         FROM fact_encounters fe
         JOIN (SELECT visit_occurrence_id, COUNT(*) AS cnt
               FROM fact_procedures GROUP BY visit_occurrence_id) x
             ON fe.visit_occurrence_id = x.visit_occurrence_id
-        GROUP BY person_id
-    ) meas ON dp.person_id = meas.person_id
+        GROUP BY patient_key
+    ) meas ON dp.patient_key = meas.patient_key
 
     LEFT JOIN (
-        SELECT DISTINCT e1.person_id, TRUE AS had_readmission
+        SELECT DISTINCT e1.patient_key, TRUE AS had_readmission
         FROM fact_encounters e1
         JOIN fact_encounters e2
-            ON e1.person_id = e2.person_id
+            ON e1.patient_key = e2.patient_key
             AND e2.visit_start_date > e1.visit_start_date
             AND DATEDIFF(day, e1.visit_start_date, e2.visit_start_date) <= 30
             AND e1.visit_occurrence_id != e2.visit_occurrence_id
         WHERE e1.visit_class ILIKE '%inpatient%'
            OR e1.visit_class ILIKE '%emergency%'
-    ) readmit ON dp.person_id = readmit.person_id
+    ) readmit ON dp.patient_key = readmit.patient_key
     """
 
     count = rs_execute(sql)
@@ -726,11 +754,14 @@ def main():
     load_dim_medication()
     load_dim_procedure()
 
-    # Facts
-    load_fact_encounters()
-    load_fact_conditions()
-    load_fact_medications()
-    load_fact_procedures()
+    # Build person_id → patient_key map for de-identified fact loading
+    pk_map = build_patient_key_map()
+
+    # Facts (use surrogate patient_key, not person_id)
+    load_fact_encounters(pk_map)
+    load_fact_conditions(pk_map)
+    load_fact_medications(pk_map)
+    load_fact_procedures(pk_map)
 
     # Aggregates
     build_fact_patient_metrics()
