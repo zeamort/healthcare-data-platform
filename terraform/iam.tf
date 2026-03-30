@@ -68,6 +68,21 @@ resource "aws_iam_policy" "lambda_custom" {
         Resource = aws_redshift_cluster.main.arn
       },
       {
+        Sid    = "KinesisAccess"
+        Effect = "Allow"
+        Action = [
+          "kinesis:GetRecords",
+          "kinesis:GetShardIterator",
+          "kinesis:DescribeStream",
+          "kinesis:DescribeStreamSummary",
+          "kinesis:ListShards",
+          "kinesis:ListStreams",
+          "kinesis:PutRecord",
+          "kinesis:PutRecords"
+        ]
+        Resource = aws_kinesis_stream.clinical_events.arn
+      },
+      {
         Sid    = "CloudWatchLogs"
         Effect = "Allow"
         Action = [

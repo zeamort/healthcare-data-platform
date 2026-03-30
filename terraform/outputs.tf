@@ -45,3 +45,13 @@ output "private_subnet_ids" {
   description = "Private subnet IDs (for Lambda VPC config)"
   value       = [aws_subnet.private_1.id, aws_subnet.private_2.id]
 }
+
+output "kinesis_stream_name" {
+  description = "Kinesis stream name for clinical events"
+  value       = aws_kinesis_stream.clinical_events.name
+}
+
+output "kinesis_stream_arn" {
+  description = "Kinesis stream ARN"
+  value       = aws_kinesis_stream.clinical_events.arn
+}
