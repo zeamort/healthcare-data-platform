@@ -1,9 +1,10 @@
 """
-Healthcare Data Platform — REST API
-FastAPI application providing operational data access to RDS PostgreSQL.
+Healthcare Data Platform — REST API (OMOP CDM)
+FastAPI application providing operational data access to OMOP-formatted
+RDS PostgreSQL database.
 
-PII fields (SSN, drivers license, passport, full address) are excluded
-from all responses per ADR-006 (data minimization).
+OMOP CDM tables are exposed via REST endpoints with concept resolution
+for human-readable names. No PII is stored in OMOP person table by design.
 
 Configuration via environment variables:
     RDS_HOST, RDS_PORT, RDS_DATABASE, RDS_USER, RDS_PASSWORD
@@ -35,25 +36,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Healthcare Data Platform API",
-    description="REST API for operational healthcare data. Synthetic Synthea data only.",
-    version="1.0.0",
+    title="Healthcare Data Platform API (OMOP CDM)",
+    description="REST API for OMOP-formatted healthcare data. Synthetic Synthea data only.",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
 
 # ── Routes are split into separate modules ───────────────
 
-from routes.patients import router as patients_router
-from routes.encounters import router as encounters_router
+from routes.patients import router as persons_router
+from routes.encounters import router as visits_router
 from routes.conditions import router as conditions_router
-from routes.medications import router as medications_router
+from routes.medications import router as drugs_router
 from routes.analytics import router as analytics_router
 
-app.include_router(patients_router, prefix="/patients", tags=["Patients"])
-app.include_router(encounters_router, prefix="/encounters", tags=["Encounters"])
+app.include_router(persons_router, prefix="/persons", tags=["Persons"])
+app.include_router(visits_router, prefix="/visits", tags=["Visits"])
 app.include_router(conditions_router, prefix="/conditions", tags=["Conditions"])
-app.include_router(medications_router, prefix="/medications", tags=["Medications"])
+app.include_router(drugs_router, prefix="/drugs", tags=["Drug Exposures"])
 app.include_router(analytics_router, prefix="/analytics", tags=["Analytics"])
 
 

@@ -1,49 +1,52 @@
-"""Patient endpoints — demographics and summary data (PII excluded)."""
+"""Person endpoints — demographics and summary data (OMOP CDM)."""
 
 from fastapi import APIRouter, HTTPException, Query
 from db import get_connection, put_connection
 
 router = APIRouter()
 
-# Columns safe to return (SSN, drivers, passport, full address excluded)
-SAFE_COLUMNS = """
-    id, first_name, last_name, gender, race, ethnicity,
-    birthdate, deathdate, marital, city, state, county, zip,
-    healthcare_expenses, healthcare_coverage, income
-"""
-
 
 @router.get("")
-def list_patients(
+def list_persons(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
-    state: str = Query(None, description="Filter by state"),
     gender: str = Query(None, description="Filter by gender (M/F)"),
+    race: str = Query(None, description="Filter by race"),
+    year_of_birth: int = Query(None, description="Filter by birth year"),
 ):
-    """List patients with pagination and optional filters."""
+    """List persons with pagination and optional filters."""
     conn = get_connection()
     cur = conn.cursor()
     try:
         where_clauses = []
         params = []
 
-        if state:
-            where_clauses.append("state = %s")
-            params.append(state)
         if gender:
-            where_clauses.append("gender = %s")
+            where_clauses.append("p.gender_source_value = %s")
             params.append(gender)
+        if race:
+            where_clauses.append("p.race_source_value ILIKE %s")
+            params.append(f"%{race}%")
+        if year_of_birth:
+            where_clauses.append("p.year_of_birth = %s")
+            params.append(year_of_birth)
 
         where = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
         offset = (page - 1) * per_page
 
-        cur.execute(f"SELECT COUNT(*) FROM patients {where}", params)
+        cur.execute(f"SELECT COUNT(*) FROM person p {where}", params)
         total = cur.fetchone()[0]
 
-        cur.execute(
-            f"SELECT {SAFE_COLUMNS} FROM patients {where} ORDER BY last_name, first_name LIMIT %s OFFSET %s",
-            params + [per_page, offset],
-        )
+        cur.execute(f"""
+            SELECT p.person_id, p.gender_source_value AS gender,
+                   p.race_source_value AS race,
+                   p.ethnicity_source_value AS ethnicity,
+                   p.year_of_birth, p.birth_datetime
+            FROM person p
+            {where}
+            ORDER BY p.person_id
+            LIMIT %s OFFSET %s
+        """, params + [per_page, offset])
         columns = [desc[0] for desc in cur.description]
         rows = [dict(zip(columns, row)) for row in cur.fetchall()]
 
@@ -61,16 +64,26 @@ def list_patients(
         put_connection(conn)
 
 
-@router.get("/{patient_id}")
-def get_patient(patient_id: str):
-    """Get a single patient by ID."""
+@router.get("/{person_id}")
+def get_person(person_id: int):
+    """Get a single person by ID."""
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute(f"SELECT {SAFE_COLUMNS} FROM patients WHERE id = %s", (patient_id,))
+        cur.execute("""
+            SELECT p.person_id, p.gender_source_value AS gender,
+                   p.race_source_value AS race,
+                   p.ethnicity_source_value AS ethnicity,
+                   p.year_of_birth, p.birth_datetime,
+                   op.observation_period_start_date,
+                   op.observation_period_end_date
+            FROM person p
+            LEFT JOIN observation_period op ON p.person_id = op.person_id
+            WHERE p.person_id = %s
+        """, (person_id,))
         row = cur.fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
+            raise HTTPException(status_code=404, detail=f"Person {person_id} not found")
         columns = [desc[0] for desc in cur.description]
         return dict(zip(columns, row))
     finally:
@@ -78,16 +91,16 @@ def get_patient(patient_id: str):
         put_connection(conn)
 
 
-@router.get("/{patient_id}/summary")
-def get_patient_summary(patient_id: str):
-    """Get aggregated summary for a patient (encounters, conditions, costs)."""
+@router.get("/{person_id}/summary")
+def get_person_summary(person_id: int):
+    """Get aggregated summary for a person."""
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT * FROM patient_summary WHERE id = %s", (patient_id,))
+        cur.execute("SELECT * FROM person_summary WHERE person_id = %s", (person_id,))
         row = cur.fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
+            raise HTTPException(status_code=404, detail=f"Person {person_id} not found")
         columns = [desc[0] for desc in cur.description]
         return dict(zip(columns, row))
     finally:
@@ -95,80 +108,88 @@ def get_patient_summary(patient_id: str):
         put_connection(conn)
 
 
-@router.get("/{patient_id}/encounters")
-def get_patient_encounters(patient_id: str):
-    """Get all encounters for a patient."""
+@router.get("/{person_id}/visits")
+def get_person_visits(person_id: int):
+    """Get all visits for a person."""
     conn = get_connection()
     cur = conn.cursor()
     try:
-        # Verify patient exists
-        cur.execute("SELECT id FROM patients WHERE id = %s", (patient_id,))
+        cur.execute("SELECT person_id FROM person WHERE person_id = %s", (person_id,))
         if not cur.fetchone():
-            raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
+            raise HTTPException(status_code=404, detail=f"Person {person_id} not found")
 
         cur.execute("""
-            SELECT id, start_time, stop_time, encounter_class, code,
-                   description, base_encounter_cost, total_claim_cost, payer_coverage,
-                   reason_code, reason_description
-            FROM encounters
-            WHERE patient_id = %s
-            ORDER BY start_time DESC
-        """, (patient_id,))
+            SELECT vo.visit_occurrence_id, vo.visit_start_date, vo.visit_end_date,
+                   vo.visit_concept_id,
+                   COALESCE(c.concept_name, 'Unknown') AS visit_class
+            FROM visit_occurrence vo
+            LEFT JOIN concept c ON vo.visit_concept_id = c.concept_id
+            WHERE vo.person_id = %s
+            ORDER BY vo.visit_start_date DESC
+        """, (person_id,))
         columns = [desc[0] for desc in cur.description]
         rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-        return {"patient_id": patient_id, "count": len(rows), "encounters": rows}
+        return {"person_id": person_id, "count": len(rows), "visits": rows}
     finally:
         cur.close()
         put_connection(conn)
 
 
-@router.get("/{patient_id}/conditions")
-def get_patient_conditions(patient_id: str):
-    """Get all conditions for a patient."""
+@router.get("/{person_id}/conditions")
+def get_person_conditions(person_id: int):
+    """Get all conditions for a person."""
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id FROM patients WHERE id = %s", (patient_id,))
+        cur.execute("SELECT person_id FROM person WHERE person_id = %s", (person_id,))
         if not cur.fetchone():
-            raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
+            raise HTTPException(status_code=404, detail=f"Person {person_id} not found")
 
         cur.execute("""
-            SELECT code, description, start_date, stop_date,
-                   CASE WHEN stop_date IS NULL OR stop_date > CURRENT_DATE
+            SELECT co.condition_concept_id,
+                   COALESCE(c.concept_name, co.condition_source_value) AS condition_name,
+                   co.condition_source_value,
+                   co.condition_start_date, co.condition_end_date,
+                   CASE WHEN co.condition_end_date IS NULL
+                             OR co.condition_end_date > CURRENT_DATE
                         THEN true ELSE false END AS is_active
-            FROM conditions
-            WHERE patient_id = %s
-            ORDER BY start_date DESC
-        """, (patient_id,))
+            FROM condition_occurrence co
+            LEFT JOIN concept c ON co.condition_concept_id = c.concept_id
+            WHERE co.person_id = %s
+            ORDER BY co.condition_start_date DESC
+        """, (person_id,))
         columns = [desc[0] for desc in cur.description]
         rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-        return {"patient_id": patient_id, "count": len(rows), "conditions": rows}
+        return {"person_id": person_id, "count": len(rows), "conditions": rows}
     finally:
         cur.close()
         put_connection(conn)
 
 
-@router.get("/{patient_id}/medications")
-def get_patient_medications(patient_id: str):
-    """Get all medications for a patient."""
+@router.get("/{person_id}/drugs")
+def get_person_drugs(person_id: int):
+    """Get all drug exposures for a person."""
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id FROM patients WHERE id = %s", (patient_id,))
+        cur.execute("SELECT person_id FROM person WHERE person_id = %s", (person_id,))
         if not cur.fetchone():
-            raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
+            raise HTTPException(status_code=404, detail=f"Person {person_id} not found")
 
         cur.execute("""
-            SELECT code, description, start_time, stop_time,
-                   base_cost, payer_coverage, total_cost, dispenses,
-                   reason_code, reason_description
-            FROM medications
-            WHERE patient_id = %s
-            ORDER BY start_time DESC
-        """, (patient_id,))
+            SELECT de.drug_concept_id,
+                   COALESCE(c.concept_name, de.drug_source_value) AS drug_name,
+                   de.drug_source_value,
+                   de.drug_exposure_start_date, de.drug_exposure_end_date,
+                   de.days_supply, de.refills, de.quantity
+            FROM drug_exposure de
+            LEFT JOIN concept c ON de.drug_concept_id = c.concept_id
+            WHERE de.person_id = %s
+            ORDER BY de.drug_exposure_start_date DESC
+        """, (person_id,))
         columns = [desc[0] for desc in cur.description]
         rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-        return {"patient_id": patient_id, "count": len(rows), "medications": rows}
+        return {"person_id": person_id, "count": len(rows), "drug_exposures": rows}
     finally:
         cur.close()
         put_connection(conn)

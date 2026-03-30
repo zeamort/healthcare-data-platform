@@ -1,4 +1,4 @@
-"""Analytics endpoints — aggregate statistics from operational data."""
+"""Analytics endpoints — aggregate statistics from OMOP operational data."""
 
 from fastapi import APIRouter
 from db import get_connection, put_connection
@@ -13,23 +13,28 @@ def platform_overview():
     cur = conn.cursor()
     try:
         stats = {}
-        for table in ["patients", "encounters", "conditions", "medications"]:
+        tables = [
+            "person", "visit_occurrence", "condition_occurrence",
+            "drug_exposure", "procedure_occurrence", "measurement",
+            "observation",
+        ]
+        for table in tables:
             cur.execute(f"SELECT COUNT(*) FROM {table}")
             stats[f"total_{table}"] = cur.fetchone()[0]
 
         cur.execute("""
             SELECT
-                COUNT(DISTINCT gender) AS gender_count,
-                COUNT(DISTINCT state) AS state_count,
-                MIN(birthdate) AS oldest_birthdate,
-                MAX(birthdate) AS youngest_birthdate
-            FROM patients
+                COUNT(DISTINCT gender_source_value) AS gender_count,
+                COUNT(DISTINCT race_source_value) AS race_count,
+                MIN(year_of_birth) AS oldest_birth_year,
+                MAX(year_of_birth) AS youngest_birth_year
+            FROM person
         """)
         row = cur.fetchone()
         stats["distinct_genders"] = row[0]
-        stats["distinct_states"] = row[1]
-        stats["oldest_birthdate"] = row[2]
-        stats["youngest_birthdate"] = row[3]
+        stats["distinct_races"] = row[1]
+        stats["oldest_birth_year"] = row[2]
+        stats["youngest_birth_year"] = row[3]
 
         return stats
     finally:
@@ -39,44 +44,45 @@ def platform_overview():
 
 @router.get("/demographics")
 def demographics():
-    """Patient demographics breakdown."""
+    """Person demographics breakdown."""
     conn = get_connection()
     cur = conn.cursor()
     try:
         # Gender distribution
         cur.execute("""
-            SELECT gender, COUNT(*) AS count
-            FROM patients GROUP BY gender ORDER BY count DESC
+            SELECT gender_source_value AS gender, COUNT(*) AS count
+            FROM person GROUP BY gender_source_value ORDER BY count DESC
         """)
         gender = [dict(zip(["gender", "count"], r)) for r in cur.fetchall()]
 
         # Race distribution
         cur.execute("""
-            SELECT race, COUNT(*) AS count
-            FROM patients GROUP BY race ORDER BY count DESC
+            SELECT race_source_value AS race, COUNT(*) AS count
+            FROM person GROUP BY race_source_value ORDER BY count DESC
         """)
         race = [dict(zip(["race", "count"], r)) for r in cur.fetchall()]
 
-        # State distribution (top 10)
+        # Ethnicity distribution
         cur.execute("""
-            SELECT state, COUNT(*) AS count
-            FROM patients GROUP BY state ORDER BY count DESC LIMIT 10
+            SELECT ethnicity_source_value AS ethnicity, COUNT(*) AS count
+            FROM person GROUP BY ethnicity_source_value ORDER BY count DESC
         """)
-        state = [dict(zip(["state", "count"], r)) for r in cur.fetchall()]
+        ethnicity = [dict(zip(["ethnicity", "count"], r)) for r in cur.fetchall()]
 
         # Age distribution
         cur.execute("""
             SELECT
                 CASE
-                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birthdate)) <= 17 THEN '0-17'
-                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birthdate)) <= 34 THEN '18-34'
-                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birthdate)) <= 49 THEN '35-49'
-                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birthdate)) <= 64 THEN '50-64'
-                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birthdate)) <= 79 THEN '65-79'
+                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birth_datetime)) <= 17 THEN '0-17'
+                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birth_datetime)) <= 34 THEN '18-34'
+                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birth_datetime)) <= 49 THEN '35-49'
+                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birth_datetime)) <= 64 THEN '50-64'
+                    WHEN EXTRACT(YEAR FROM AGE(CURRENT_DATE, birth_datetime)) <= 79 THEN '65-79'
                     ELSE '80+'
                 END AS age_group,
                 COUNT(*) AS count
-            FROM patients
+            FROM person
+            WHERE birth_datetime IS NOT NULL
             GROUP BY age_group
             ORDER BY age_group
         """)
@@ -85,7 +91,7 @@ def demographics():
         return {
             "by_gender": gender,
             "by_race": race,
-            "by_state": state,
+            "by_ethnicity": ethnicity,
             "by_age_group": age,
         }
     finally:
@@ -93,24 +99,25 @@ def demographics():
         put_connection(conn)
 
 
-@router.get("/encounter-classes")
-def encounter_class_breakdown():
-    """Encounter volume by class."""
+@router.get("/visit-types")
+def visit_type_breakdown():
+    """Visit volume by type (concept)."""
     conn = get_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT encounter_class,
+            SELECT COALESCE(c.concept_name, 'Unknown') AS visit_type,
+                   vo.visit_concept_id,
                    COUNT(*) AS count,
-                   COUNT(DISTINCT patient_id) AS unique_patients,
-                   COALESCE(AVG(total_claim_cost), 0) AS avg_cost
-            FROM encounters
-            GROUP BY encounter_class
+                   COUNT(DISTINCT vo.person_id) AS unique_patients
+            FROM visit_occurrence vo
+            LEFT JOIN concept c ON vo.visit_concept_id = c.concept_id
+            GROUP BY c.concept_name, vo.visit_concept_id
             ORDER BY count DESC
         """)
         columns = [desc[0] for desc in cur.description]
         rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-        return {"encounter_classes": rows}
+        return {"visit_types": rows}
     finally:
         cur.close()
         put_connection(conn)
