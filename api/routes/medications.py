@@ -1,7 +1,8 @@
 """Drug exposure endpoints — search prescriptions (OMOP CDM)."""
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends
 from db import get_connection, put_connection
+from auth import require_role
 
 router = APIRouter()
 
@@ -13,6 +14,7 @@ def search_drug_exposures(
     source_value: str = Query(None, description="Search by source value (partial match)"),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
+    user=Depends(require_role("analyst")),
 ):
     """Search drug exposures with optional filters."""
     conn = get_connection()
@@ -68,7 +70,7 @@ def search_drug_exposures(
 
 
 @router.get("/summary")
-def drug_exposures_summary():
+def drug_exposures_summary(user=Depends(require_role("analyst"))):
     """Get top drugs by prescription frequency."""
     conn = get_connection()
     cur = conn.cursor()

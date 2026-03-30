@@ -1,13 +1,14 @@
 """Analytics endpoints — aggregate statistics from OMOP operational data."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from db import get_connection, put_connection
+from auth import require_role
 
 router = APIRouter()
 
 
 @router.get("/overview")
-def platform_overview():
+def platform_overview(user=Depends(require_role("analyst"))):
     """Get high-level platform statistics."""
     conn = get_connection()
     cur = conn.cursor()
@@ -43,7 +44,7 @@ def platform_overview():
 
 
 @router.get("/demographics")
-def demographics():
+def demographics(user=Depends(require_role("analyst"))):
     """Person demographics breakdown."""
     conn = get_connection()
     cur = conn.cursor()
@@ -100,7 +101,7 @@ def demographics():
 
 
 @router.get("/visit-types")
-def visit_type_breakdown():
+def visit_type_breakdown(user=Depends(require_role("analyst"))):
     """Visit volume by type (concept)."""
     conn = get_connection()
     cur = conn.cursor()
@@ -124,7 +125,7 @@ def visit_type_breakdown():
 
 
 @router.get("/data-quality")
-def data_quality():
+def data_quality(user=Depends(require_role("admin"))):
     """Run data quality checks."""
     conn = get_connection()
     cur = conn.cursor()

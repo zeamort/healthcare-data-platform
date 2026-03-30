@@ -1,7 +1,8 @@
 """Person endpoints — demographics and summary data (OMOP CDM)."""
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from db import get_connection, put_connection
+from auth import require_role
 
 router = APIRouter()
 
@@ -13,6 +14,7 @@ def list_persons(
     gender: str = Query(None, description="Filter by gender (M/F)"),
     race: str = Query(None, description="Filter by race"),
     year_of_birth: int = Query(None, description="Filter by birth year"),
+    user=Depends(require_role("admin")),
 ):
     """List persons with pagination and optional filters."""
     conn = get_connection()
@@ -65,7 +67,7 @@ def list_persons(
 
 
 @router.get("/{person_id}")
-def get_person(person_id: int):
+def get_person(person_id: int, user=Depends(require_role("admin"))):
     """Get a single person by ID."""
     conn = get_connection()
     cur = conn.cursor()
@@ -92,7 +94,7 @@ def get_person(person_id: int):
 
 
 @router.get("/{person_id}/summary")
-def get_person_summary(person_id: int):
+def get_person_summary(person_id: int, user=Depends(require_role("admin"))):
     """Get aggregated summary for a person."""
     conn = get_connection()
     cur = conn.cursor()
@@ -109,7 +111,7 @@ def get_person_summary(person_id: int):
 
 
 @router.get("/{person_id}/visits")
-def get_person_visits(person_id: int):
+def get_person_visits(person_id: int, user=Depends(require_role("admin"))):
     """Get all visits for a person."""
     conn = get_connection()
     cur = conn.cursor()
@@ -136,7 +138,7 @@ def get_person_visits(person_id: int):
 
 
 @router.get("/{person_id}/conditions")
-def get_person_conditions(person_id: int):
+def get_person_conditions(person_id: int, user=Depends(require_role("admin"))):
     """Get all conditions for a person."""
     conn = get_connection()
     cur = conn.cursor()
@@ -167,7 +169,7 @@ def get_person_conditions(person_id: int):
 
 
 @router.get("/{person_id}/drugs")
-def get_person_drugs(person_id: int):
+def get_person_drugs(person_id: int, user=Depends(require_role("admin"))):
     """Get all drug exposures for a person."""
     conn = get_connection()
     cur = conn.cursor()

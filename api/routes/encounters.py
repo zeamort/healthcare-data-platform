@@ -1,7 +1,8 @@
 """Visit occurrence endpoints — search and filter healthcare visits (OMOP CDM)."""
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends
 from db import get_connection, put_connection
+from auth import require_role
 
 router = APIRouter()
 
@@ -11,6 +12,7 @@ def list_visits(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     visit_concept_id: int = Query(None, description="Filter by visit concept ID (9201=Inpatient, 9202=Outpatient, 9203=ER)"),
+    user=Depends(require_role("analyst")),
 ):
     """List visit occurrences with pagination and optional concept filter."""
     conn = get_connection()

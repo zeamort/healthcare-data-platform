@@ -8,6 +8,8 @@ for human-readable names. No PII is stored in OMOP person table by design.
 
 Configuration via environment variables:
     RDS_HOST, RDS_PORT, RDS_DATABASE, RDS_USER, RDS_PASSWORD
+    API_KEYS — comma-separated key:role pairs (e.g. "abc123:admin,def456:analyst")
+               If unset, auth is disabled (dev mode).
 """
 
 import os

@@ -1,7 +1,8 @@
 """Condition occurrence endpoints — search diagnoses (OMOP CDM)."""
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends
 from db import get_connection, put_connection
+from auth import require_role
 
 router = APIRouter()
 
@@ -13,6 +14,7 @@ def search_conditions(
     active_only: bool = Query(False, description="Only return active (ongoing) conditions"),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
+    user=Depends(require_role("analyst")),
 ):
     """Search condition occurrences with optional filters."""
     conn = get_connection()
@@ -66,7 +68,7 @@ def search_conditions(
 
 
 @router.get("/summary")
-def conditions_summary():
+def conditions_summary(user=Depends(require_role("analyst"))):
     """Get top conditions by frequency."""
     conn = get_connection()
     cur = conn.cursor()
