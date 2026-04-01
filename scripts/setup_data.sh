@@ -79,7 +79,7 @@ for file in "${OMOP_FILES[@]}"; do
     echo "  Copying ${file}..."
     aws s3 cp "s3://${SOURCE_BUCKET}/${SOURCE_PREFIX}/${file}" \
               "s3://${S3_BUCKET}/${S3_PREFIX}${file}" \
-              --quiet
+              --copy-props none --quiet
 done
 
 echo ""
