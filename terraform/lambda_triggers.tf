@@ -94,6 +94,57 @@ resource "null_resource" "schema_init" {
   ]
 }
 
+# ── Scheduled Sync: RDS → Redshift + ML ────────────────
+# Runs hourly so streaming data in RDS flows to Redshift
+# and ML models are retrained/applied on a cadence.
+
+resource "aws_cloudwatch_event_rule" "hourly_etl" {
+  name                = "${local.name_prefix}-hourly-etl"
+  description         = "Hourly RDS→Redshift sync + ML pipeline"
+  schedule_expression = "rate(1 hour)"
+
+  tags = { Name = "${local.name_prefix}-hourly-etl" }
+}
+
+resource "aws_cloudwatch_event_target" "etl_rds_to_redshift" {
+  rule      = aws_cloudwatch_event_rule.hourly_etl.name
+  target_id = "etl-rds-to-redshift"
+  arn       = aws_lambda_function.etl_rds_to_redshift.arn
+  input     = jsonencode({ source = "scheduled" })
+}
+
+resource "aws_lambda_permission" "eventbridge_invoke_etl" {
+  statement_id  = "AllowEventBridgeInvokeETL"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.etl_rds_to_redshift.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.hourly_etl.arn
+}
+
+# Also schedule ML apply (checks if models are READY and runs inference)
+resource "aws_cloudwatch_event_rule" "hourly_ml_apply" {
+  name                = "${local.name_prefix}-hourly-ml-apply"
+  description         = "Hourly check: apply Redshift ML results if models are READY"
+  schedule_expression = "rate(1 hour)"
+
+  tags = { Name = "${local.name_prefix}-hourly-ml-apply" }
+}
+
+resource "aws_cloudwatch_event_target" "ml_redshift_apply" {
+  rule      = aws_cloudwatch_event_rule.hourly_ml_apply.name
+  target_id = "ml-redshift-apply"
+  arn       = aws_lambda_function.ml_redshift.arn
+  input     = jsonencode({ action = "apply" })
+}
+
+resource "aws_lambda_permission" "eventbridge_invoke_ml" {
+  statement_id  = "AllowEventBridgeInvokeML"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ml_redshift.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.hourly_ml_apply.arn
+}
+
 # ── S3 VPC Endpoint ─────────────────────────────────────
 # Free gateway endpoint — keeps S3 traffic off the NAT gateway.
 
