@@ -202,10 +202,10 @@ def create_risk_model():
         TARGET had_30_day_readmission
         FUNCTION predict_readmission
         IAM_ROLE '{REDSHIFT_IAM_ROLE}'
-        MODEL_TYPE 'AUTO'
+        MODEL_TYPE 'XGBOOST'
         SETTINGS (
             S3_BUCKET '{S3_BUCKET}',
-            MAX_RUNTIME 3600
+            MAX_RUNTIME 1800
         );
     """
     run_sql(sql, "Creating risk model (AUTO)...")
