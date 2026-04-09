@@ -112,10 +112,12 @@ def create_clustering_model():
         )
         FUNCTION predict_cluster
         IAM_ROLE '{REDSHIFT_IAM_ROLE}'
-        MODEL_TYPE 'KMEANS'
+        AUTO OFF
+        MODEL_TYPE KMEANS
+        PREPROCESSORS 'none'
+        HYPERPARAMETERS DEFAULT EXCEPT (K '4')
         SETTINGS (
             S3_BUCKET '{S3_BUCKET}',
-            K '4',
             MAX_RUNTIME 3600
         );
     """
@@ -202,7 +204,12 @@ def create_risk_model():
         TARGET had_30_day_readmission
         FUNCTION predict_readmission
         IAM_ROLE '{REDSHIFT_IAM_ROLE}'
-        MODEL_TYPE 'XGBOOST'
+        AUTO OFF
+        MODEL_TYPE XGBOOST
+        PROBLEM_TYPE BINARY_CLASSIFICATION
+        OBJECTIVE 'binary:logistic'
+        PREPROCESSORS 'none'
+        HYPERPARAMETERS DEFAULT EXCEPT (NUM_ROUND '100')
         SETTINGS (
             S3_BUCKET '{S3_BUCKET}',
             MAX_RUNTIME 1800

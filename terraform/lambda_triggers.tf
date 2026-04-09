@@ -156,3 +156,30 @@ resource "aws_vpc_endpoint" "s3" {
 
   tags = { Name = "${local.name_prefix}-s3-endpoint" }
 }
+
+# ── SageMaker VPC Endpoints (for Redshift ML) ──────────
+# Redshift ML needs to reach SageMaker APIs from private subnets.
+
+resource "aws_vpc_endpoint" "sagemaker_api" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.sagemaker.api"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+
+  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
+  security_group_ids = [aws_security_group.redshift.id]
+
+  tags = { Name = "${local.name_prefix}-sagemaker-api-endpoint" }
+}
+
+resource "aws_vpc_endpoint" "sagemaker_runtime" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.sagemaker.runtime"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+
+  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
+  security_group_ids = [aws_security_group.redshift.id]
+
+  tags = { Name = "${local.name_prefix}-sagemaker-runtime-endpoint" }
+}

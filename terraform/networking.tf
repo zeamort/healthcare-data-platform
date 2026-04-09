@@ -161,6 +161,14 @@ resource "aws_security_group" "redshift" {
     cidr_blocks = var.allowed_cidr_blocks
   }
 
+  ingress {
+    description = "HTTPS for SageMaker VPC endpoints (Redshift ML)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
