@@ -34,7 +34,7 @@ variable "rds_instance_class" {
 variable "redshift_node_type" {
   description = "Redshift node type"
   type        = string
-  default     = "ra3.large"
+  default     = "dc2.large"
 }
 
 variable "redshift_number_of_nodes" {
