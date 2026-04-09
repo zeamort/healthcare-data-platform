@@ -118,3 +118,79 @@ resource "aws_iam_role_policy_attachment" "lambda_custom" {
   role       = aws_iam_role.lambda_execution.name
   policy_arn = aws_iam_policy.lambda_custom.arn
 }
+
+# ── Redshift IAM Role (for Redshift ML + S3 access) ────
+
+resource "aws_iam_role" "redshift" {
+  name = "${local.name_prefix}-redshift-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "redshift.amazonaws.com" }
+    }]
+  })
+
+  tags = { Name = "${local.name_prefix}-redshift-role" }
+}
+
+resource "aws_iam_role_policy" "redshift_ml" {
+  name = "${local.name_prefix}-redshift-ml"
+  role = aws_iam_role.redshift.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "S3Access"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
+        ]
+        Resource = [
+          aws_s3_bucket.data.arn,
+          "${aws_s3_bucket.data.arn}/*"
+        ]
+      },
+      {
+        Sid    = "SageMakerAccess"
+        Effect = "Allow"
+        Action = [
+          "sagemaker:CreateTrainingJob",
+          "sagemaker:CreateModel",
+          "sagemaker:CreateEndpoint",
+          "sagemaker:CreateEndpointConfig",
+          "sagemaker:CreateAutoMLJob",
+          "sagemaker:CreateAutoMLJobV2",
+          "sagemaker:CreateCompilationJob",
+          "sagemaker:DescribeTrainingJob",
+          "sagemaker:DescribeModel",
+          "sagemaker:DescribeEndpoint",
+          "sagemaker:DescribeEndpointConfig",
+          "sagemaker:DescribeAutoMLJob",
+          "sagemaker:DescribeAutoMLJobV2",
+          "sagemaker:DescribeCompilationJob",
+          "sagemaker:DeleteModel",
+          "sagemaker:DeleteEndpoint",
+          "sagemaker:DeleteEndpointConfig",
+          "sagemaker:StopTrainingJob",
+          "sagemaker:StopAutoMLJob",
+          "sagemaker:ListCandidatesForAutoMLJob"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "PassRole"
+        Effect = "Allow"
+        Action = "iam:PassRole"
+        Resource = aws_iam_role.redshift.arn
+      }
+    ]
+  })
+}

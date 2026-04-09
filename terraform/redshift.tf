@@ -25,6 +25,9 @@ resource "aws_redshift_cluster" "main" {
   enhanced_vpc_routing      = true
   encrypted                 = true
 
+  iam_roles = [aws_iam_role.redshift.arn]
+  default_iam_role_arn = aws_iam_role.redshift.arn
+
   automated_snapshot_retention_period = 1
   skip_final_snapshot                 = true
   preferred_maintenance_window        = "sun:05:00-sun:06:00"

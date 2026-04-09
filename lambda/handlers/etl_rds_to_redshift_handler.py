@@ -18,8 +18,7 @@ log.setLevel(logging.INFO)
 lambda_client = boto3.client("lambda")
 
 ML_FUNCTIONS = [
-    os.environ.get("ML_CLUSTERING_FUNCTION", ""),
-    os.environ.get("ML_RISK_SCORING_FUNCTION", ""),
+    os.environ.get("ML_REDSHIFT_FUNCTION", ""),
     os.environ.get("ML_COMORBIDITY_FUNCTION", ""),
 ]
 
