@@ -18,6 +18,7 @@ import logging
 from datetime import date
 
 import psycopg2
+from psycopg2.extras import execute_values
 
 # ── Logging ──────────────────────────────────────────────
 
@@ -75,8 +76,17 @@ def rs_execute(sql, params=None):
         conn.close()
 
 
-def rs_insert_batch(sql, rows, batch_size=500):
-    """Insert rows into Redshift in batches."""
+def rs_insert_batch(sql, rows, batch_size=2000):
+    """Insert rows into Redshift using multi-row VALUES (execute_values).
+
+    Accepts standard INSERT ... VALUES (%s,%s,...) syntax — automatically
+    converts for execute_values, which is 10-50x faster than executemany.
+    """
+    import re
+    # execute_values needs "INSERT INTO t (cols) VALUES %s"
+    # Convert "VALUES (%s, %s, ...)" → "VALUES %s"
+    ev_sql = re.sub(r"VALUES\s*\([^)]+\)", "VALUES %s", sql, flags=re.IGNORECASE)
+
     conn = rs_conn()
     conn.autocommit = False
     cur = conn.cursor()
@@ -84,7 +94,7 @@ def rs_insert_batch(sql, rows, batch_size=500):
     try:
         for i in range(0, len(rows), batch_size):
             batch = rows[i : i + batch_size]
-            cur.executemany(sql, batch)
+            execute_values(cur, ev_sql, batch, page_size=batch_size)
             total += len(batch)
             if total % 5000 == 0:
                 log.info("  ... %d rows inserted", total)

@@ -85,3 +85,4 @@ output "ecr_repository_url" {
   description = "ECR repository URL for the dashboard image"
   value       = aws_ecr_repository.dashboard.repository_url
 }
+

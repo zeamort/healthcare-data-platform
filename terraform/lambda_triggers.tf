@@ -79,6 +79,7 @@ resource "null_resource" "schema_init" {
     command = <<-EOT
       aws lambda invoke \
         --function-name ${aws_lambda_function.schema_init.function_name} \
+        --cli-binary-format raw-in-base64-out \
         --payload '{"action":"init"}' \
         --region ${var.aws_region} \
         /tmp/schema_init_response.json && \

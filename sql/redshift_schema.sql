@@ -413,10 +413,10 @@ ORDER BY pm.active_drug_exposures DESC;
 
 INSERT INTO dim_date (date_key, full_date, year, quarter, month, month_name,
                       week_of_year, day_of_month, day_of_week, day_name, is_weekend)
-WITH RECURSIVE date_series AS (
-    SELECT '2000-01-01'::DATE AS d
+WITH RECURSIVE date_series(d) AS (
+    SELECT '2000-01-01'::DATE
     UNION ALL
-    SELECT DATEADD(day, 1, d) FROM date_series WHERE d < '2030-12-31'
+    SELECT (DATEADD(day, 1, d))::DATE FROM date_series WHERE d < '2030-12-31'
 )
 SELECT
     TO_NUMBER(TO_CHAR(d, 'YYYYMMDD'), '99999999')   AS date_key,
