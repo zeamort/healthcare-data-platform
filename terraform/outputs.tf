@@ -56,6 +56,26 @@ output "kinesis_stream_arn" {
   value       = aws_kinesis_stream.clinical_events.arn
 }
 
+output "lambda_bucket" {
+  description = "S3 bucket for Lambda deployment packages"
+  value       = aws_s3_bucket.lambda.id
+}
+
+output "schema_init_function" {
+  description = "Schema init Lambda function name"
+  value       = aws_lambda_function.schema_init.function_name
+}
+
+output "etl_s3_to_rds_function" {
+  description = "S3→RDS ETL Lambda function name"
+  value       = aws_lambda_function.etl_s3_to_rds.function_name
+}
+
+output "etl_rds_to_redshift_function" {
+  description = "RDS→Redshift ETL Lambda function name"
+  value       = aws_lambda_function.etl_rds_to_redshift.function_name
+}
+
 output "dashboard_url" {
   description = "Dashboard ALB URL"
   value       = "http://${aws_lb.dashboard.dns_name}"

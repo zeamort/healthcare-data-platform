@@ -83,6 +83,12 @@ resource "aws_iam_policy" "lambda_custom" {
         Resource = aws_kinesis_stream.clinical_events.arn
       },
       {
+        Sid    = "LambdaInvoke"
+        Effect = "Allow"
+        Action = ["lambda:InvokeFunction"]
+        Resource = "arn:aws:lambda:${var.aws_region}:*:function:${local.name_prefix}-ml-*"
+      },
+      {
         Sid    = "CloudWatchLogs"
         Effect = "Allow"
         Action = [

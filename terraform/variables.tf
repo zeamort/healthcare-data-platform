@@ -43,6 +43,12 @@ variable "redshift_number_of_nodes" {
   default     = 1
 }
 
+variable "cutoff_date" {
+  description = "Batch/streaming split date (YYYY-MM-DD). Records before this date load in batch; after go to streaming."
+  type        = string
+  default     = "2020-01-01"
+}
+
 variable "allowed_cidr_blocks" {
   description = "CIDR blocks allowed to access databases (set to your IP for security, e.g. [\"203.0.113.5/32\"])"
   type        = list(string)
