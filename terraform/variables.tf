@@ -46,7 +46,9 @@ variable "redshift_number_of_nodes" {
 variable "cutoff_date" {
   description = "Batch/streaming split date (YYYY-MM-DD). Records before this date load in batch; after go to streaming."
   type        = string
-  default     = "2020-01-01"
+  # Synthea public OMOP 1k dataset spans 1909 → 2019-01-09. Cutoff at 2017-01-01
+  # gives an ~80/20 batch/streaming split (~58k post-cutoff events to stream).
+  default     = "2017-01-01"
 }
 
 variable "allowed_cidr_blocks" {
