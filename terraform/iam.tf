@@ -129,7 +129,7 @@ resource "aws_iam_role" "redshift" {
     Statement = [{
       Action    = "sts:AssumeRole"
       Effect    = "Allow"
-      Principal = { Service = "redshift.amazonaws.com" }
+      Principal = { Service = ["redshift.amazonaws.com", "sagemaker.amazonaws.com"] }
     }]
   })
 
@@ -182,6 +182,17 @@ resource "aws_iam_role_policy" "redshift_ml" {
           "sagemaker:StopTrainingJob",
           "sagemaker:StopAutoMLJob",
           "sagemaker:ListCandidatesForAutoMLJob"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "EC2Describe"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeNetworkInterfaces"
         ]
         Resource = "*"
       },

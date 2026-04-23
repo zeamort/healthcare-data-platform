@@ -181,6 +181,9 @@ resource "aws_lambda_function" "ml_redshift" {
       ML_MODULE        = "ml_redshift"
       S3_BUCKET        = aws_s3_bucket.data.id
       REDSHIFT_IAM_ROLE = aws_iam_role.redshift.arn
+      # Required so Redshift ML can launch SageMaker training jobs in the VPC.
+      SAGEMAKER_SUBNET_IDS         = join(",", local.lambda_subnet_ids)
+      SAGEMAKER_SECURITY_GROUP_IDS = join(",", local.lambda_security_group_ids)
     })
   }
 

@@ -22,7 +22,7 @@ resource "aws_redshift_cluster" "main" {
   cluster_subnet_group_name = aws_redshift_subnet_group.main.name
   vpc_security_group_ids    = [aws_security_group.redshift.id]
   publicly_accessible       = false
-  enhanced_vpc_routing      = true
+  enhanced_vpc_routing      = false
   encrypted                 = true
 
   iam_roles = [aws_iam_role.redshift.arn]
