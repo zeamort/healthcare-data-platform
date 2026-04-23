@@ -16,6 +16,7 @@ Configuration via environment variables:
 """
 
 import os
+import json
 import time
 import logging
 
@@ -38,6 +39,22 @@ REDSHIFT = {
 
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 REDSHIFT_IAM_ROLE = os.environ.get("REDSHIFT_IAM_ROLE", "")
+
+# VPC config is required because the Redshift cluster is in a private subnet;
+# SageMaker training jobs must be launched into that same VPC.
+SAGEMAKER_SUBNET_IDS = [s for s in os.environ.get("SAGEMAKER_SUBNET_IDS", "").split(",") if s]
+SAGEMAKER_SECURITY_GROUP_IDS = [s for s in os.environ.get("SAGEMAKER_SECURITY_GROUP_IDS", "").split(",") if s]
+
+
+def vpc_config_json():
+    """Return VPC_CONFIG JSON string for Redshift ML CREATE MODEL, or empty if unset."""
+    if not SAGEMAKER_SUBNET_IDS or not SAGEMAKER_SECURITY_GROUP_IDS:
+        return ""
+    cfg = {
+        "SubnetIds": SAGEMAKER_SUBNET_IDS,
+        "SecurityGroupIds": SAGEMAKER_SECURITY_GROUP_IDS,
+    }
+    return json.dumps(cfg).replace("'", "''")
 
 
 def rs_conn():
@@ -92,8 +109,12 @@ def create_clustering_model():
     """Create K-Means clustering model in Redshift ML."""
     log.info("── Creating clustering model ──")
 
-    # Drop existing model if any
-    run_sql("DROP MODEL IF EXISTS patient_clusters;", "Dropping existing clustering model...")
+    # Drop existing model if any (force handles stuck training state)
+    try:
+        run_sql("DROP MODEL IF EXISTS patient_clusters;", "Dropping existing clustering model...")
+    except Exception as e:
+        log.warning("Normal drop failed (%s), trying DROP MODEL ... CASCADE", e)
+        run_sql("DROP MODEL IF EXISTS patient_clusters CASCADE;", "Force dropping...")
 
     sql = f"""
         CREATE MODEL patient_clusters
@@ -179,7 +200,11 @@ def create_risk_model():
     """Create risk scoring model in Redshift ML (classification)."""
     log.info("── Creating risk scoring model ──")
 
-    run_sql("DROP MODEL IF EXISTS patient_risk;", "Dropping existing risk model...")
+    try:
+        run_sql("DROP MODEL IF EXISTS patient_risk;", "Dropping existing risk model...")
+    except Exception as e:
+        log.warning("Normal drop failed (%s), trying CASCADE", e)
+        run_sql("DROP MODEL IF EXISTS patient_risk CASCADE;", "Force dropping...")
 
     sql = f"""
         CREATE MODEL patient_risk
@@ -206,7 +231,6 @@ def create_risk_model():
         IAM_ROLE '{REDSHIFT_IAM_ROLE}'
         AUTO OFF
         MODEL_TYPE XGBOOST
-        PROBLEM_TYPE BINARY_CLASSIFICATION
         OBJECTIVE 'binary:logistic'
         PREPROCESSORS 'none'
         HYPERPARAMETERS DEFAULT EXCEPT (NUM_ROUND '100')
@@ -304,9 +328,38 @@ def main(action=None):
         log.error("S3_BUCKET and REDSHIFT_IAM_ROLE env vars required.")
         raise ValueError("Missing S3_BUCKET or REDSHIFT_IAM_ROLE")
 
+    if action == "diag":
+        log.info("Running diagnostics...")
+        conn = rs_conn()
+        conn.autocommit = True
+        cur = conn.cursor()
+        queries = [
+            ("Version", "SELECT version()"),
+            ("Current user", "SELECT current_user"),
+            ("IAM roles", "SELECT * FROM svv_iam_role"),
+            ("Cluster info", "SELECT * FROM stv_node_storage_capacity LIMIT 1"),
+            ("ML support check", "SELECT 1 FROM pg_proc WHERE proname = 'create_model' LIMIT 1"),
+        ]
+        for label, sql in queries:
+            try:
+                cur.execute(sql)
+                rows = cur.fetchall()
+                log.info("%s: %s", label, rows)
+            except Exception as e:
+                log.error("%s error: %s", label, e)
+        cur.close()
+        conn.close()
+        return
+
     if action == "create":
-        create_clustering_model()
-        create_risk_model()
+        try:
+            create_clustering_model()
+        except Exception as e:
+            log.warning("Clustering model creation: %s", e)
+        try:
+            create_risk_model()
+        except Exception as e:
+            log.warning("Risk model creation: %s", e)
         log.info("Models submitted for training. Check status later with action='apply'.")
         return
 
@@ -316,12 +369,18 @@ def main(action=None):
         log.info("Model states — clustering: %s, risk: %s", cluster_state, risk_state)
 
         if cluster_state == "READY":
-            apply_clustering_results()
+            try:
+                apply_clustering_results()
+            except Exception as e:
+                log.error("Clustering apply failed: %s", e)
         else:
             log.warning("Clustering model not ready (state=%s). Skipping.", cluster_state)
 
         if risk_state == "READY":
-            apply_risk_results()
+            try:
+                apply_risk_results()
+            except Exception as e:
+                log.error("Risk apply failed: %s", e)
         else:
             log.warning("Risk model not ready (state=%s). Skipping.", risk_state)
         return
