@@ -68,6 +68,31 @@ build_zip "ml_comorbidity" \
     "$HANDLERS_DIR/ml_handler.py" \
     "$ETL_DIR/ml_comorbidity.py"
 
+# ── FastAPI handler (includes api/ tree + mangum/fastapi deps) ─────────
+echo "  Building api..."
+API_SRC="$PROJECT_DIR/api"
+API_BUILD="$PROJECT_DIR/.build/lambda/api"
+mkdir -p "$API_BUILD"
+cp "$API_SRC"/*.py "$API_BUILD/"
+cp -r "$API_SRC/routes" "$API_BUILD/"
+cp "$HANDLERS_DIR/api_handler.py" "$API_BUILD/"
+
+# Install FastAPI stack into the zip. psycopg2 stays in the shared layer.
+pip3 install mangum fastapi "pydantic>=2.0" -t "$API_BUILD" \
+    --platform manylinux2014_x86_64 \
+    --implementation cp \
+    --python-version 3.12 \
+    --only-binary=:all: \
+    --quiet 2>/dev/null || {
+    echo "  WARNING: Could not install FastAPI deps with pip. Trying Docker..."
+    docker run --rm -v "$API_BUILD:/out" \
+        public.ecr.aws/lambda/python:3.12 \
+        pip install mangum fastapi "pydantic>=2.0" -t /out --quiet
+}
+
+(cd "$API_BUILD" && zip -q -r "$BUILD_DIR/api.zip" .)
+echo "  api.zip ($(du -h "$BUILD_DIR/api.zip" | cut -f1))"
+
 # ── psycopg2 Lambda Layer ──────────────────────────────
 echo ""
 echo "═══ Building psycopg2 Lambda layer ═══"

@@ -43,6 +43,13 @@ variable "redshift_number_of_nodes" {
   default     = 1
 }
 
+variable "api_keys" {
+  description = "Comma-separated API keys for the REST API as 'key:role' pairs, e.g. 'abc123:admin,def456:analyst'. If empty, auth is disabled (dev only)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "cutoff_date" {
   description = "Batch/streaming split date (YYYY-MM-DD). Records before this date load in batch; after go to streaming."
   type        = string

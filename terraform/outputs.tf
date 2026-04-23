@@ -86,3 +86,13 @@ output "ecr_repository_url" {
   value       = aws_ecr_repository.dashboard.repository_url
 }
 
+output "api_endpoint" {
+  description = "REST API base URL (API Gateway v2 HTTP API invoke URL)"
+  value       = aws_apigatewayv2_stage.default.invoke_url
+}
+
+output "api_function_name" {
+  description = "Lambda function name for the API"
+  value       = aws_lambda_function.api.function_name
+}
+
