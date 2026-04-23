@@ -21,7 +21,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+# Lambda's runtime installs its own root handler before this module imports,
+# so basicConfig() is a no-op and our level/handlers don't take effect. Force
+# INFO on the root and our module logger so handler logs reach CloudWatch.
+logging.getLogger().setLevel(logging.INFO)
 log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
 
 RDS_HOST = os.environ["RDS_HOST"]
 RDS_PORT = int(os.environ.get("RDS_PORT", "5432"))
@@ -299,7 +304,8 @@ def lambda_handler(event, context):
     conn = get_connection()
     cur = conn.cursor()
 
-    processed = 0
+    inserted = 0
+    duplicates = 0
     errors = 0
 
     try:
@@ -312,14 +318,34 @@ def lambda_handler(event, context):
                 data = event_data.get("data", {})
 
                 inserter = INSERTERS.get(event_type)
-                if inserter:
-                    inserter(cur, data)
-                    processed += 1
-                else:
+                if inserter is None:
                     log.warning("Unknown event type: %s", event_type)
+                    continue
+
+                # Savepoint per record: a single bad row (e.g. a dirty FK
+                # reference) must not poison the rest of the Kinesis batch.
+                # Without this, psycopg2 leaves the transaction in an aborted
+                # state and every subsequent INSERT fails until rollback.
+                cur.execute("SAVEPOINT rec")
+                try:
+                    inserter(cur, data)
+                    # rowcount is 1 when inserted, 0 when ON CONFLICT DO NOTHING
+                    # suppressed a duplicate primary key. Capture it BEFORE the
+                    # RELEASE SAVEPOINT below, which runs its own execute and
+                    # overwrites cur.rowcount to 0.
+                    rc = cur.rowcount
+                    cur.execute("RELEASE SAVEPOINT rec")
+                    if rc == 1:
+                        inserted += 1
+                    else:
+                        duplicates += 1
+                except Exception as e:
+                    cur.execute("ROLLBACK TO SAVEPOINT rec")
+                    log.warning("Record dropped (%s): %s", event_type, e)
+                    errors += 1
 
             except Exception as e:
-                log.error("Error processing record: %s", e)
+                log.error("Malformed record: %s", e)
                 errors += 1
 
         conn.commit()
@@ -332,5 +358,6 @@ def lambda_handler(event, context):
     finally:
         cur.close()
 
-    log.info("Processed %d records, %d errors", processed, errors)
-    return {"processed": processed, "errors": errors}
+    log.info("Inserted %d, duplicates %d, errors %d (of %d received)",
+             inserted, duplicates, errors, inserted + duplicates + errors)
+    return {"inserted": inserted, "duplicates": duplicates, "errors": errors}

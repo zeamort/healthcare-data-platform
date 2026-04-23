@@ -49,7 +49,8 @@ kinesis = boto3.client("kinesis", region_name=AWS_REGION)
 
 # Clinical event tables and their date columns
 EVENT_TABLES = {
-    "visit_occurrence": "visit_start_date",
+    # visit_occurrence is loaded in full during batch so FKs from child events
+    # always resolve. Streaming only carries the child clinical events.
     "condition_occurrence": "condition_start_date",
     "drug_exposure": "drug_exposure_start_date",
     "procedure_occurrence": "procedure_date",

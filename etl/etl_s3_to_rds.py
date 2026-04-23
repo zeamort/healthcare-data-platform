@@ -334,18 +334,19 @@ def load_visit_occurrence():
         "preceding_visit_occurrence_id",
     ]
 
+    # NOTE: visit_occurrence is NOT split by the batch/stream cutoff.
+    # Child events (conditions, procedures, etc.) can have dates that straddle
+    # their parent visit's date range, so filtering visits by start_date would
+    # cause FK violations in either direction. Visit table is small (~27k rows)
+    # so the full preload cost is negligible.
     rows = []
     skipped = 0
-    cutoff_skipped = 0
     for row in reader:
         vid = clean_int(row.get("visit_occurrence_id"))
         if vid is None:
             skipped += 1
             continue
         start_date = clean_date(row.get("visit_start_date"))
-        if not before_cutoff(start_date):
-            cutoff_skipped += 1
-            continue
         rows.append((
             vid,
             clean_int(row.get("person_id")),
@@ -369,8 +370,8 @@ def load_visit_occurrence():
     conn = get_connection()
     loaded = bulk_insert(conn, "visit_occurrence", columns, rows)
     conn.close()
-    log.info("Visit occurrence: %d loaded, %d skipped, %d after cutoff",
-             loaded, skipped, cutoff_skipped)
+    log.info("Visit occurrence: %d loaded, %d skipped (full preload — no cutoff)",
+             loaded, skipped)
     return loaded, skipped
 
 
