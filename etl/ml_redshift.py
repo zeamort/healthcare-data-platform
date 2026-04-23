@@ -206,6 +206,7 @@ def create_risk_model():
         log.warning("Normal drop failed (%s), trying CASCADE", e)
         run_sql("DROP MODEL IF EXISTS patient_risk CASCADE;", "Force dropping...")
 
+    # XGBoost requires INT/FLOAT target, not BOOL — cast had_30_day_readmission to INT (0/1).
     sql = f"""
         CREATE MODEL patient_risk
         FROM (
@@ -222,7 +223,7 @@ def create_risk_model():
                 total_measurements,
                 visits_per_year,
                 avg_days_between_visits,
-                had_30_day_readmission
+                CAST(had_30_day_readmission AS INT) AS had_30_day_readmission
             FROM fact_patient_metrics
             WHERE age IS NOT NULL AND total_encounters > 0
         )
@@ -246,33 +247,32 @@ def apply_risk_results():
     """Run inference and write risk scores to fact_patient_metrics."""
     log.info("Applying risk scoring results...")
 
-    # Use the prediction probability as risk score
+    # XGBoost binary:logistic returns a probability in [0, 1]. Use it directly as
+    # risk_score and bucket into tiers.
     sql = """
         UPDATE fact_patient_metrics
-        SET risk_score = CASE
-                WHEN predict_readmission(
-                    age, total_encounters, total_conditions,
-                    active_conditions, chronic_condition_count,
-                    total_drug_exposures, active_drug_exposures,
-                    unique_drug_concepts, total_procedures,
-                    total_measurements, visits_per_year,
-                    avg_days_between_visits
-                ) = TRUE THEN 0.75
-                ELSE 0.25
-            END,
+        SET risk_score = sub.p,
             risk_tier = CASE
-                WHEN predict_readmission(
-                    age, total_encounters, total_conditions,
-                    active_conditions, chronic_condition_count,
-                    total_drug_exposures, active_drug_exposures,
-                    unique_drug_concepts, total_procedures,
-                    total_measurements, visits_per_year,
-                    avg_days_between_visits
-                ) = TRUE THEN 'high'
+                WHEN sub.p >= 0.7 THEN 'high'
+                WHEN sub.p >= 0.3 THEN 'medium'
                 ELSE 'low'
             END,
             updated_at = GETDATE()
-        WHERE age IS NOT NULL AND total_encounters > 0;
+        FROM (
+            SELECT
+                patient_key,
+                predict_readmission(
+                    age, total_encounters, total_conditions,
+                    active_conditions, chronic_condition_count,
+                    total_drug_exposures, active_drug_exposures,
+                    unique_drug_concepts, total_procedures,
+                    total_measurements, visits_per_year,
+                    avg_days_between_visits
+                ) AS p
+            FROM fact_patient_metrics
+            WHERE age IS NOT NULL AND total_encounters > 0
+        ) sub
+        WHERE fact_patient_metrics.patient_key = sub.patient_key;
     """
     run_sql(sql, "Writing risk scores...")
 
