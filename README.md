@@ -1,84 +1,95 @@
 # Open-Source Healthcare Data Engineering Framework
 
-An end-to-end cloud-native data engineering platform using [Synthea](https://github.com/synthetichealth/synthea) synthetic patient data on AWS. Built as a reference implementation for healthcare data pipeline architecture — demonstrating batch ingestion, ETL, OLTP/OLAP separation, analytics, and machine learning with fully reproducible Infrastructure as Code.
+An end-to-end cloud-native data platform built on AWS using [Synthea](https://github.com/synthetichealth/synthea) synthetic patient data. Demonstrates batch ingestion, streaming, OLTP/OLAP separation, in-warehouse ML, and analytics — all reproducible via Terraform.
 
 ## Architecture
 
 ```
 Data Sources          Ingestion Layer        Storage Layer              Application Layer
 ┌──────────────┐      ┌───────────────┐      ┌────────────────────┐     ┌──────────────────┐
-│ Synthea CSV  │─────▶│  AWS Lambda   │─────▶│  S3 (Data Lake)    │     │  FastAPI REST API │
-│ (Batch)      │      │  (ETL)        │─────▶│  RDS PostgreSQL    │────▶│  (Operational)    │
-└──────────────┘      └───────────────┘      │  (OLTP)            │     └──────────────────┘
+│ Synthea CSV  │─────▶│  S3 Trigger   │─────▶│  S3 (Data Lake)    │     │ FastAPI REST API │
+│ (Batch)      │      │  → Lambda ETL │─────▶│  RDS PostgreSQL    │────▶│ (Operational)    │
+└──────────────┘      └───────────────┘      │  (OLTP, OMOP CDM)  │     └──────────────────┘
                                              └────────┬───────────┘
 ┌──────────────┐      ┌───────────────┐               │              ┌──────────────────┐
-│ Synthea      │─────▶│  Kinesis      │─────▶┌────────▼───────────┐  │  Analytics        │
-│ Simulator    │      │  (Streaming)  │      │  Redshift          │──▶│  Dashboard        │
-│ (Real-time)  │      └───────────────┘      │  (OLAP/Warehouse)  │  │  (Visualization)  │
-└──────────────┘                             └────────────────────┘  └──────────────────┘
+│ Stream       │─────▶│  Kinesis      │─────▶┌────────▼───────────┐  │ Streamlit         │
+│ Simulator    │      │  → Lambda     │      │  Redshift          │──▶│ Dashboard         │
+│ (post-cutoff)│      └───────────────┘      │  (OLAP, Star Schema│  │ (Fargate)         │
+└──────────────┘                             │   + Redshift ML)   │  └──────────────────┘
+                                             └────────┬───────────┘
                                                       │
-                                             ┌────────▼───────────┐
-                                             │  ML Pipeline       │
-                                             │  (K-means Patient  │
-                                             │   Segmentation)    │
-                                             └────────────────────┘
+                                             ┌────────▼──────────────────┐
+                                             │ ML: K-Means clustering,    │
+                                             │ XGBoost risk scoring,      │
+                                             │ comorbidity analysis       │
+                                             └────────────────────────────┘
 ```
+
+Data model: [OMOP CDM v5.4](https://ohdsi.github.io/CommonDataModel/) in RDS, star schema in Redshift (see `docs/adr/`).
 
 ## Project Structure
 
 ```
 ├── terraform/       # Infrastructure as Code (AWS resources)
-├── etl/             # ETL pipeline scripts (Lambda functions)
-├── api/             # FastAPI REST API application
-├── sql/             # Database schemas (RDS + Redshift)
-├── scripts/         # Utility scripts (data generation, deployment helpers)
-├── tests/           # Test suite
-│   └── fixtures/    # Test data files
-└── docs/            # Documentation and architecture diagrams
+├── etl/             # ETL + ML Python modules (deployed as Lambdas)
+├── lambda/handlers/ # Lambda entry points
+├── api/             # FastAPI REST API
+├── dashboard/       # Streamlit analytics dashboard (Fargate)
+├── sql/             # Database schemas (RDS OMOP + Redshift star schema)
+├── scripts/         # package_lambdas.sh, setup_data.sh
+├── tests/           # pytest suite
+└── docs/            # Architecture decision records, guides
 ```
 
 ## Key Features
 
-- **Batch ETL Pipeline**: S3 → Lambda → RDS PostgreSQL → Redshift
-- **Real-time Streaming**: Kinesis Data Streams for continuous ingestion
-- **OLTP/OLAP Separation**: RDS for operational queries, Redshift for analytics
-- **Healthcare Analytics**: Patient segmentation, disease prevalence, medication patterns
-- **ML Pipeline**: K-means clustering for patient population segmentation
-- **REST API**: FastAPI endpoints for operational data access
+- **Batch ETL**: S3 manifest → Lambda → RDS (OMOP CDM) → Redshift (star schema), chained by S3 events and EventBridge
+- **Streaming**: Kinesis Data Streams for post-cutoff clinical events, consumed by a Lambda that writes back to RDS
+- **OLTP/OLAP separation**: RDS for point queries, Redshift for analytics
+- **In-warehouse ML**: Redshift ML (SageMaker-backed) — K-means patient clustering, XGBoost 30-day readmission risk
+- **Comorbidity analysis**: SQL-based disease co-occurrence pairs
+- **REST API**: FastAPI with API-key auth and role-based access
+- **Security**: Private subnets for RDS/Redshift, NAT for Lambda egress, SageMaker VPC endpoints, de-identified analytics layer with surrogate keys
 - **Infrastructure as Code**: Full Terraform deployment
 
 ## Prerequisites
 
-- AWS Account with appropriate permissions
+- AWS account + AWS CLI configured
 - Terraform >= 1.0
-- Python 3.9+
-- AWS CLI configured
+- Python 3.12
+- Docker (for building the psycopg2 Lambda layer)
 
 ## Quick Start
 
 ```bash
-# 1. Clone the repository
-git clone <repo-url>
-cd healthcare-data-platform
+# 1. Package Lambda deployment zips + psycopg2 layer
+./scripts/package_lambdas.sh
 
 # 2. Deploy infrastructure
 cd terraform
-terraform init && terraform apply
+terraform init
+terraform apply
+cd ..
 
-# 3. Run ETL pipeline
-cd ../etl
-pip install -r requirements.txt
-python run_pipeline.py
+# 3. Kick off the batch pipeline
+#    (copies Synthea OMOP CSVs into S3, which triggers the chain:
+#     S3 → RDS → Redshift → ML jobs)
+./scripts/setup_data.sh
 
-# 4. Start the API
-cd ../api
-pip install -r requirements.txt
-uvicorn main:app --reload
+# 4. After ~5–10 min, apply trained ML model results back to fact tables
+aws lambda invoke --function-name healthcare-dev-ml-redshift \
+  --payload '{"action":"apply"}' --cli-binary-format raw-in-base64-out /tmp/out.json
+
+# 5. Stream post-cutoff events into Kinesis (optional)
+python3 etl/stream_simulator.py
+
+# 6. Tear down when done (RDS + Redshift + NAT accrue cost)
+cd terraform && terraform destroy
 ```
 
 ## Data
 
-This project uses [Synthea](https://github.com/synthetichealth/synthea) synthetic patient data. No real patient data is used. See `docs/data_guide.md` for instructions on generating or downloading datasets.
+Uses [Synthea](https://github.com/synthetichealth/synthea) synthetic patient data. No real PHI. See `docs/data_guide.md`.
 
 ## License
 
