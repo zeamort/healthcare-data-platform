@@ -308,15 +308,10 @@ class TestMLDeIdentification:
         with open(os.path.join(self.ML_DIR, filename), "r") as f:
             return f.read()
 
-    def test_clustering_no_person_id(self):
-        code = self._read_file("ml_clustering.py")
+    def test_ml_redshift_no_person_id(self):
+        code = self._read_file("ml_redshift.py")
         assert "person_id" not in code, \
-            "ml_clustering.py must use patient_key, not person_id"
-
-    def test_risk_scoring_no_person_id(self):
-        code = self._read_file("ml_risk_scoring.py")
-        assert "person_id" not in code, \
-            "ml_risk_scoring.py must use patient_key, not person_id"
+            "ml_redshift.py must use patient_key, not person_id"
 
     def test_comorbidity_no_person_id(self):
         code = self._read_file("ml_comorbidity.py")

@@ -325,38 +325,7 @@ class TestStreamConsumerClean:
         assert self.mod.clean_numeric(None) is None
 
 
-# ── Risk scoring helpers ─────────────────────────────────
-
-class TestRiskTier:
-    """Tests for ml_risk_scoring.risk_tier."""
-
-    def setup_method(self):
-        import importlib
-        self.mod = importlib.import_module("ml_risk_scoring")
-
-    def test_low(self):
-        assert self.mod.risk_tier(0.10) == "low"
-
-    def test_low_boundary(self):
-        assert self.mod.risk_tier(0.24) == "low"
-
-    def test_medium(self):
-        assert self.mod.risk_tier(0.25) == "medium"
-
-    def test_medium_upper(self):
-        assert self.mod.risk_tier(0.49) == "medium"
-
-    def test_high(self):
-        assert self.mod.risk_tier(0.50) == "high"
-
-    def test_high_upper(self):
-        assert self.mod.risk_tier(0.74) == "high"
-
-    def test_very_high(self):
-        assert self.mod.risk_tier(0.75) == "very_high"
-
-    def test_very_high_max(self):
-        assert self.mod.risk_tier(1.0) == "very_high"
-
-    def test_zero(self):
-        assert self.mod.risk_tier(0.0) == "low"
+# Risk tiering used to live in ml_risk_scoring.py as a Python helper; it was
+# moved into a SQL UPDATE inside ml_redshift.apply_risk_results() when the
+# project migrated from sklearn-in-Lambda to Redshift ML. The tiering logic
+# is now exercised end-to-end by the apply step against the real warehouse.
