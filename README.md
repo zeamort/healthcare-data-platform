@@ -115,6 +115,14 @@ echo "$DASHBOARD_URL"           # Streamlit dashboard
 | `deploy_dashboard.sh` | Build dashboard container, push to ECR, force ECS redeploy |
 | `fast_destroy.sh` | Delete orphan Lambda ENIs then `terraform destroy` (~10 min vs ~30 min) |
 
+## Screenshots
+
+### Analytics Dashboard (Streamlit on ECS Fargate, backed by Redshift)
+![Dashboard](docs/screenshots/dashboard.png)
+
+### REST API — auto-generated Swagger UI (FastAPI on Lambda + API Gateway v2)
+![Swagger UI](docs/screenshots/swagger.png)
+
 ## Data
 
 Uses [Synthea](https://github.com/synthetichealth/synthea) synthetic patient data. No real PHI. See `docs/data_guide.md`.
