@@ -14,7 +14,16 @@ echo
 echo "── Stream consumer totals (last 15 min) ──"
 aws logs tail "/aws/lambda/$STREAM_CONSUMER" --since 15m 2>/dev/null \
     | grep "Inserted" \
-    | awk -F'Inserted |, duplicates |, errors | \(of | received' \
-          '{ins+=$2; dup+=$3; err+=$4; rec+=$5}
-           END {if (rec == 0) print "  (no recent activity)";
-                else printf "  received=%d  inserted=%d  duplicates=%d  errors=%d\n", rec, ins, dup, err}'
+    | awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "Inserted")   ins += $(i+1) + 0
+                if ($i == "duplicates") dup += $(i+1) + 0
+                if ($i == "errors")     err += $(i+1) + 0
+                if ($i == "(of")        rec += $(i+1) + 0
+            }
+        }
+        END {
+            if (rec == 0) print "  (no recent activity)"
+            else printf "  received=%d  inserted=%d  duplicates=%d  errors=%d\n", rec, ins, dup, err
+        }'
